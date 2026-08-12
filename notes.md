@@ -17,6 +17,13 @@ the 8 kHz hardware-clocked acquisition path, the DAC output path, networking,
 discovery, the parameter registry, and UDP streaming of all 15 sources. The
 figures under "Bring-up evidence" below are the current acceptance record.
 
+Two exceptions, both from 2026-08-12 and both electrical rather than
+real-time: the DAC output path is verified as it was driven before that date,
+with channel A alone against a fixed channel C, and the symmetric A/C drive
+that replaced it is timing-verified but has not been observed on a scope.
+Separately, `adc0` was rewired to a stator coil and its calibration has not
+been established. See the "Symmetric A/C differential drive" entry below.
+
 The exciter drive is only as safe as the limits in `src/config.rs`, and those
 limits are compile-time constants that describe the fitted hardware. Re-check
 them, and `DAC_POLARITY` in `src/rig.rs`, against the hardware before every
@@ -141,6 +148,46 @@ That path was not exercised directly: making this host stop answering without
 closing the connection needs privileges not available here, so the bound rests
 on the keep-alive mechanism, whose live half is what the 90 s test above
 demonstrates.
+
+### Symmetric A/C differential drive (2026-08-12)
+
+Channel C stopped being a fixed reference and is now driven to `MID_RAIL - out`
+against A's `MID_RAIL + out`. See the standing constraints above for what that
+buys and what it costs.
+
+Exact clean W5500 firmware `0.1.0 993b309`:
+
+- `helic-rt-regression --profile rig-profile.toml --no-flash` passed every
+  phase at 7999.5–8000.2 ticks/s with zero overruns, tick timeouts, dropped
+  records, lost packets, capture drops or index gaps;
+- `loop_time_max` 44 µs against the unchanged 60 µs limit, up from 37 µs before
+  this change. The cost is where it should be: `t_actuate_max` went from 4 µs
+  to 10 µs, consistent with one extra 2 µs AD5064 word plus the 3 µs
+  `wait_word_settle`. `t_measure_max` (19 µs), `wake_phase` (36 µs) and
+  `t_rest_max` (16 µs) are unchanged. 16 µs of headroom remains, so the two-word
+  write is affordable at 8 kHz, but a third channel would not obviously be;
+- `helic-rt-layout` passed, and `nm` shows no `wait_word_settle` symbol at all,
+  so it inlined into the already-SRAM-resident `actuate_rig` rather than
+  leaving a call into flash on the tick path. Worth re-checking by the same
+  means after any future change to that function;
+- `cargo fmt`, release clippy, `helic-deps-check` all passed, and the W6100
+  variant cross-built.
+
+**The differential swing itself is not verified.** The optoNCDT was switched
+off for this session, so the blind-feedback guard latched at boot (`safety` 10,
+`tripped` 1) and the gate held the actuator at `safe_output` throughout: `out`
+was identically 0.0 across an 8000-sample capture, so no non-zero command ever
+reached `actuate`. Nor can this be closed in software any more, because `adc0`
+now watches the stator coil rather than the actuator controller's current
+sense, so there is no longer a measured input anywhere on the DAC side of the
+rig. Confirming that A and C move oppositely and equally needs a scope on the
+AD5064 A and C outputs during the `sine` smoke test, with the laser powered so
+the gate can arm. Until then, treat the doubled range as designed and
+timing-verified but electrically unconfirmed.
+
+A 1 s disarmed capture did show `adc0` sitting at a ±0.5 mV noise floor about
+zero, which is what an unenergised coil should look like and is weak evidence
+that the new input is wired and sane; it says nothing about its calibration.
 
 The laser was switched off partway through this session, so
 `laser_frames_received` stayed at 0 and `safety` read 10: the gate had latched
