@@ -17,12 +17,13 @@ the 8 kHz hardware-clocked acquisition path, the DAC output path, networking,
 discovery, the parameter registry, and UDP streaming of all 15 sources. The
 figures under "Bring-up evidence" below are the current acceptance record.
 
-Two exceptions, both from 2026-08-12 and both electrical rather than
-real-time: the DAC output path is verified as it was driven before that date,
-with channel A alone against a fixed channel C, and the symmetric A/C drive
-that replaced it is timing-verified but has not been observed on a scope.
-Separately, `adc0` was rewired to a stator coil and its calibration has not
-been established. See the "Symmetric A/C differential drive" entry below.
+Exceptions, all electrical rather than real-time. The DAC output path is
+verified as it was driven before 2026-08-12, with channel A alone against a
+fixed channel C; the symmetric A/C drive that replaced it is timing-verified
+but has not been observed on a scope. ADC channel 0 was rewired to a stator
+coil (`coil`) and its calibration has not been established. ADC channel 1
+(`drive`) is declared in firmware but not yet wired. See the last two bring-up
+entries below.
 
 The exciter drive is only as safe as the limits in `src/config.rs`, and those
 limits are compile-time constants that describe the fitted hardware. Re-check
@@ -57,11 +58,28 @@ change of analogue board, specimen, or exciter.
   (see the 2026-08-12 bring-up below). Do not remove it, and do not replace it
   with an `embassy-time` delay: the tick path is Embassy-free and
   SRAM-resident.
-- **ADC input 0 wiring.** As of 2026-08-12, `adc0` reads a voltage from a coil
-  wound around the stator, not the actuator controller's current-sense output
-  as it did previously. Calibration/interpretation of `adc0` in any analysis
-  downstream of this date must account for the change; data captured before it
-  is current, not stator coil voltage.
+- **ADC channel map, and a rename.** AD7609 channels 0 and 1 are named
+  sources; 2-7 are spare and keep generic `adc2`-`adc7` names. Both named
+  channels use the AD7609's true-bipolar differential inputs.
+  - `coil` (channel 0) is a sense coil wound around the stator. Before
+    2026-08-12 this channel was the actuator controller's current-sense
+    output, so captures from before that date hold current, not coil voltage,
+    and the two are not comparable.
+  - `drive` (channel 1) is the exciter current controller's differential
+    input. Declared in firmware on 2026-08-12; wiring due 2026-08-13. Until
+    that is done the input is open and the source reads noise, so check it is
+    actually connected before believing it.
+  The wire-visible names changed with this: `adc0` became `coil` and `adc1`
+  became `drive`, and `rig-profile.toml` follows. Sources are discovered by
+  name, so host code and saved captures predating this will not match on the
+  old names.
+- **`drive` is uncalibrated.** It taps the exciter controller's input rather
+  than the DAC pins, so any cape buffer gain or attenuation is inside the
+  reading and `drive` is **not** a priori `2 * out`. Measure the ratio once
+  against a scope and record it here before using `drive` quantitatively; until
+  then it establishes only that the output path moves, not by how much. Note
+  also that this makes `drive` sensitive to cape changes in a way a direct DAC
+  tap would not be, so recheck it after any analogue board swap.
 - **Laser measuring rate.** The optoNCDT is configured at startup from
   `SAMPLE_RATE`, and expects the factory 921.6 kBaud setting.
 - **Flashing.** Flash with `cargo run --release`, which uses `probe-rs run`.
@@ -177,17 +195,15 @@ Exact clean W5500 firmware `0.1.0 993b309`:
 off for this session, so the blind-feedback guard latched at boot (`safety` 10,
 `tripped` 1) and the gate held the actuator at `safe_output` throughout: `out`
 was identically 0.0 across an 8000-sample capture, so no non-zero command ever
-reached `actuate`. Nor can this be closed in software any more, because `adc0`
-now watches the stator coil rather than the actuator controller's current
-sense, so there is no longer a measured input anywhere on the DAC side of the
-rig. Confirming that A and C move oppositely and equally needs a scope on the
-AD5064 A and C outputs during the `sine` smoke test, with the laser powered so
-the gate can arm. Until then, treat the doubled range as designed and
-timing-verified but electrically unconfirmed.
+reached `actuate`. Confirming that A and C move oppositely and equally needs
+the laser powered so the gate can arm, and then either a scope on the AD5064 A
+and C outputs or the `drive` loopback described below. Until then, treat the
+doubled range as designed and timing-verified but electrically unconfirmed.
 
-A 1 s disarmed capture did show `adc0` sitting at a ±0.5 mV noise floor about
-zero, which is what an unenergised coil should look like and is weak evidence
-that the new input is wired and sane; it says nothing about its calibration.
+A 1 s disarmed capture did show channel 0 sitting at a ±0.5 mV noise floor
+about zero, which is what an unenergised coil should look like and is weak
+evidence that the new input is wired and sane; it says nothing about its
+calibration.
 
 The laser was switched off partway through this session, so
 `laser_frames_received` stayed at 0 and `safety` read 10: the gate had latched

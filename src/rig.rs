@@ -173,9 +173,24 @@ impl MagnetoelasticParts {
 impl Rig for MagnetoelasticRig {
     // `measure` fills this exact order. The common loop appends controller
     // telemetry and generated signals without experiment-specific indices.
+    //
+    // AD7609 channels 0 and 1 carry named physical measurements; 2-7 are
+    // spare and keep generic names. Both named channels are differential
+    // pairs, as the AD7609's inputs are true-bipolar differential:
+    //
+    // - `coil`: voltage across a sense coil wound around the stator. This is
+    //   the specimen-side measurement, not the actuator drive.
+    // - `drive`: the exciter current controller's own differential input,
+    //   which is the DAC output after whatever the analogue cape does to it.
+    //   It is therefore NOT a priori equal to `2 * out`: any cape buffer gain
+    //   or attenuation sits inside this reading, so the volts-per-volt factor
+    //   against `out` has to be measured once and recorded in `notes.md`
+    //   before this source is used quantitatively. Its purpose is to make the
+    //   output path observable in software at all, which it was not once
+    //   channel 0 moved to the coil.
     const INPUTS: &'static [(&'static str, &'static str)] = &[
-        ("adc0", "V"),
-        ("adc1", "V"),
+        ("coil", "V"),
+        ("drive", "V"),
         ("adc2", "V"),
         ("adc3", "V"),
         ("adc4", "V"),

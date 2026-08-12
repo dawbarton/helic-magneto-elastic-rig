@@ -38,7 +38,10 @@ exact_symbols = [
 [regression]
 sample_rate_hz = 8000
 default_host = "192.168.1.235"
-capture_sources = ["adc0", "out"]
+# The smoke-test set pairs the commanded output with the loopback that
+# observes it (`drive`, the exciter controller's differential input) and the
+# specimen-side measurement (`coil`).
+capture_sources = ["coil", "drive", "out"]
 wired = true
 # The fitted Ethernet controller, which the default build already targets.
 default_board = "w5500"

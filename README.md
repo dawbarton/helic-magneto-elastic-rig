@@ -17,8 +17,15 @@ this repository implements.
 
 ## Hardware
 
-- AD7609 eight-channel simultaneous ADC on SPI1. PWM-driven CONVST supplies
-  the hardware sample clock and the BUSY falling edge starts each RT tick.
+- AD7609 eight-channel simultaneous ADC on SPI1, true-bipolar differential
+  inputs at ±10 V. PWM-driven CONVST supplies the hardware sample clock and
+  the BUSY falling edge starts each RT tick. Channels 0 and 1 are named
+  physical measurements and the rest are spare:
+  - `coil`: a sense coil wound around the stator, measuring the specimen side.
+  - `drive`: the exciter current controller's differential input, which is the
+    DAC output seen through the analogue cape. It exists so the output path is
+    observable in software, but it is not calibrated against `out`; see
+    `notes.md` before using it quantitatively.
 - AD5064 four-channel DAC on the same core-1 SPI bus. Channels A and C are the
   exciter's differential current-controller inputs, driven symmetrically about
   the 2.048 V common-mode point (`MID_RAIL + out` on A, `MID_RAIL - out` on C),
