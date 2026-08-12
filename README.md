@@ -1,9 +1,9 @@
 # Magneto-elastic rig
 
 HELIC-DAQ firmware for the magneto-elastic rig: an electromagnetically excited
-cantilever whose tip displacement is measured by an optoNCDT laser
-triangulation sensor, with eight simultaneously sampled analogue inputs and a
-four-channel analogue output stage. It runs on a W5500-EVB-Pico2, which is what
+specimen whose tip displacement is measured by an optoNCDT laser triangulation
+sensor, with eight simultaneously sampled analogue inputs and a four-channel
+analogue output stage. It runs on a W5500-EVB-Pico2, which is what
 the default build targets; the pin-compatible W6100-EVB-Pico2 is available
 through the `board-w6100` feature.
 
