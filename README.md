@@ -79,7 +79,7 @@ The verification gates come from the platform's host package, pinned to the
 same tag as the crates, and are installed rather than copied:
 
 ```sh
-pip install "helic-daq @ git+https://github.com/dawbarton/helic-daq@v0.1.2#subdirectory=host-python"
+pip install "helic-daq @ git+https://github.com/dawbarton/helic-daq@v0.1.3#subdirectory=host-python"
 
 cargo fmt --all -- --check
 cargo clippy --release --workspace -- -D warnings

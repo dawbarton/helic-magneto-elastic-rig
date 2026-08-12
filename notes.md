@@ -43,15 +43,20 @@ change of analogue board, specimen, or exciter.
 - **Sequential host access.** The control server is single-client. A host
   process killed mid-request leaves the connection held until it times out,
   and the next connection attempt will fail meanwhile.
-- **Interrupted captures leave the rig streaming.** A host tool killed during
-  a capture never sends the stream stop, so the rig keeps sending UDP records
-  at the sample rate to a host that is no longer listening. Observed on
-  2026-08-12: the board then became unreachable from the host (`No route to
-  host`) while defmt showed it perfectly healthy, ticking at 8 kHz with the
-  dropped-record counter climbing. Reflashing, which resets the stream, is the
-  recovery. Let the regression runner finish rather than interrupting it, and
-  space consecutive runs: a run started immediately after the previous one has
-  been seen to time out on its first request.
+- **A silent laser takes the rig off the network.** When the optoNCDT stops
+  answering, the platform's driver probes baud rates about four times a second
+  and does not stop. Measured on 2026-08-12: in that state `records_dropped`
+  climbed to 833369 with streaming *off*, so core 0 was not draining the ring
+  every 5 ms and the network stack was not being serviced either. The rig then
+  looks absent from the host (`No route to host`, or connections that time
+  out) while defmt shows core 1 ticking normally at 8 kHz. A reset appears to
+  fix it but only buys time; the sensor is what needs attention. This is an
+  open platform defect, recorded in the HELIC-DAQ repository's `notes.md`.
+- **Interrupted captures do not leave the rig streaming.** An earlier revision
+  of this file said they did. They do not: killing a client sends a FIN and
+  the control server stops the stream in the same defmt millisecond. Since
+  platform `v0.1.3` the streamer also refuses to send at all without an open
+  control connection.
 
 ## Bring-up evidence
 
