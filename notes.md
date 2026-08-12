@@ -17,6 +17,10 @@ the 8 kHz hardware-clocked acquisition path, the DAC output path, networking,
 discovery, the parameter registry, and UDP streaming of all 15 sources. The
 figures under "Bring-up evidence" below are the current acceptance record.
 
+The stator stage added on 2026-08-12 is **not** covered by any of this: it has
+never been connected. See the standing constraint below and
+`docs/stator-stage.md`.
+
 Exceptions, all electrical rather than real-time. The DAC output path is
 verified as it was driven before 2026-08-12, with channel A alone against a
 fixed channel C; the symmetric A/C drive that replaced it is timing-verified
@@ -80,6 +84,17 @@ change of analogue board, specimen, or exciter.
   then it establishes only that the output path moves, not by how much. Note
   also that this makes `drive` sensitive to cape changes in a way a direct DAC
   tap would not be, so recheck it after any analogue board swap.
+- **The stator stage is entirely unverified in hardware.** Firmware for the
+  stepper-driven micrometer landed on 2026-08-12 and nothing about it has been
+  wired, moved, or measured. `docs/stator-stage.md` is the design and the
+  commissioning procedure; until that procedure has been run, treat every
+  number about the axis as an assumption. In particular the fitted motor is
+  unidentified, so 200 full steps per revolution and direct coupling to the
+  barrel are guesses, and `STATOR_MICROSTEPS` is deliberately left at 1.0
+  because guessing it low under-travels while guessing it high drives into the
+  end stop. Nothing protects against that second case in software: the soft
+  travel limits are converted to steps with the same constant, so the
+  current-limit potentiometer is the real backstop and should be set low.
 - **Laser measuring rate.** The optoNCDT is configured at startup from
   `SAMPLE_RATE`, and expects the factory 921.6 kBaud setting.
 - **Flashing.** Flash with `cargo run --release`, which uses `probe-rs run`.
@@ -245,7 +260,7 @@ identically zero. Both ADC traces are at the converter's quantisation floor,
 which for `drive` is what an open differential input should look like and is
 therefore not evidence that anything is connected.
 
-Two things to do when the wiring goes in:
+Two things to do when the `drive` wiring goes in:
 
 1. Check the exciter input's levels before connecting. The pair should sit
    within the AD7609's ±10 V differential range at DAC levels, but if the cape
@@ -256,3 +271,62 @@ Two things to do when the wiring goes in:
    the output moves. Doing this with the laser powered would also close the
    outstanding symmetric-drive question in the entry above, since a correct
    A/C pair gives `drive` twice the amplitude a stuck C would.
+
+### Stator stage firmware, nothing wired (2026-08-12)
+
+A stepper-driven micrometer that sets the stator gap. The design, the wiring
+recommendations, and the commissioning procedure are in
+`docs/stator-stage.md`; this entry records only what was established, which is
+software and nothing else.
+
+**No hardware exists yet.** The stepper, the MP6500 carrier, and the opto
+sensor have not been connected, so nothing below is evidence about motion,
+position, backlash, or noise. The rig was not flashed for this work.
+
+What the static gates establish:
+
+- `cargo fmt`, release clippy with `-D warnings`, `helic-deps-check`, and the
+  W6100 cross-build all pass. No new crate dependency was needed: the PIO
+  assembler is reached through embassy-rp's re-export, and `round` is
+  implemented locally rather than pulling in `libm`, so
+  `dependency-policy.toml` is unchanged;
+- `helic-rt-layout` passes against `rig-profile.toml`, whose `capture_sources`
+  gained `stator`;
+- `set_rig_param` remains SRAM-resident at 0x2000093c and, by `llvm-objdump`,
+  contains **no `bl` or `blx` at all**. `issue_command` therefore inlined
+  completely rather than leaving a call into flash, the same outcome recorded
+  for `wait_word_settle` and worth re-checking by the same means after any
+  change to `set_param`. `measure_rig` likewise gained no branch to a flash
+  address from the added atomic load.
+
+Design decisions worth not relitigating:
+
+- The axis is on core 0, with PIO0 generating the pulses. Core 1 was rejected
+  because the stepper needs ramping, homing, timeouts, and aborts, all of which
+  want `embassy-time`, and because the determinism argument for core 1 is
+  answered by the PIO instead. The safety property that makes core 0 acceptable
+  is that a starved TX FIFO **stretches one step interval** rather than losing
+  or duplicating a pulse, so the step count stays exactly the number of words
+  pushed even if core 0 stalls.
+- The stage is not spring preloaded, so the micrometer can push but not pull.
+  Every move therefore ends with an advance, and a retract leaves the position
+  undefined until the following advance re-establishes contact. This is why
+  `stator` reads NaN after an aborted retract rather than reporting a step
+  count that no longer describes the mechanism.
+- The opto datum is good to about 1/1000 inch, which is 8 full steps or 64
+  microsteps, from previous testing. That is the dominant error term: absolute
+  accuracy is 25 µm while relative resolution is 0.4 µm, so home once per
+  session rather than between measurements, and read `stator_home_error` as an
+  audit with a 64-microstep noise floor rather than a measurement.
+
+Two things that need deciding before the axis is used in anger:
+
+1. **The displacement window.** `DISPLACEMENT_MIN_MM`/`DISPLACEMENT_MAX_MM` is a
+   fixed 10-40 mm window about the ~25 mm rest point. Moving the stator moves
+   the specimen's rest displacement, so a stator travel wide enough to push the
+   rest point outside that window trips the gate on a healthy rig. Widening the
+   window weakens the guard; making it relative to a rest point that tracks
+   stator position is a firmware change not yet made.
+2. **Whether stepping during a capture is ever wanted.** The firmware does not
+   forbid it, because the noise characterisation needs it, but the `stator`
+   source makes a violation visible after the fact.

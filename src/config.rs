@@ -59,6 +59,119 @@ pub const DISPLACEMENT_MAX_MM: f32 = 40.0;
 /// `rig.rs`.
 pub const LASER_STALE_AFTER_S: f32 = 0.02;
 
+// --- Stator stage (stepper-driven micrometer) ----------------------------
+//
+// The stator's displacement is set by a two-phase stepper turning an imperial
+// micrometer through an MP6500 carrier. Nothing here runs on core 1. See
+// `docs/stator-stage.md` for the mechanism, the wiring, and the commissioning
+// procedure; the constants below are the compile-time half of that document.
+
+/// Micrometer barrel pitch. One turn advances the spindle by 1/40 inch, which
+/// is 0.635 mm exactly, so the millimetre arithmetic downstream contains no
+/// rounded conversion.
+pub const MICROMETER_PITCH_MM: f32 = 25.4 / 40.0;
+
+/// Full steps per motor revolution, and any reduction between motor and
+/// barrel folded in. 200 is the standard 1.8 degree two-phase stepper.
+///
+/// The fitted motor has not been identified, so this is an assumption until
+/// the steps-per-millimetre check at commissioning confirms it.
+pub const STATOR_FULL_STEPS_PER_REV: f32 = 200.0;
+
+/// Microsteps per full step, set by the MS1/MS2 strapping at the driver.
+///
+/// This must match the hardware, and the error is asymmetric: too low makes
+/// every move proportionally short, which is harmless, while too high makes
+/// every move proportionally long, into the end stop. The soft travel limits
+/// do not protect against the second case, because they are converted to steps
+/// with this same constant. It therefore stays at 1.0, matching an unmodified
+/// MP6500 carrier (both MS pins are pulled low internally), and is raised to
+/// 8.0 only once MS1/MS2 are confirmed strapped high by inspection.
+pub const STATOR_MICROSTEPS: f32 = 1.0;
+
+/// True when advancing the spindle increases the micrometer's barrel reading.
+/// A hardware fact about the fitted micrometer, not a free choice.
+pub const STATOR_ADVANCE_INCREASES_READING: bool = true;
+
+/// Signed millimetres of barrel reading per microstep in the advance
+/// direction, where advance is the direction in which the spindle pushes the
+/// stage. Carrying the sign here keeps every conversion downstream a plain
+/// multiply, and makes reversing the convention a one-line change.
+pub const STATOR_MM_PER_MICROSTEP: f32 = if STATOR_ADVANCE_INCREASES_READING {
+    MICROMETER_PITCH_MM / (STATOR_FULL_STEPS_PER_REV * STATOR_MICROSTEPS)
+} else {
+    -MICROMETER_PITCH_MM / (STATOR_FULL_STEPS_PER_REV * STATOR_MICROSTEPS)
+};
+
+/// DIR level that advances the spindle, pushing the stage. Hardware fact.
+pub const STATOR_DIR_ADVANCE_HIGH: bool = true;
+
+/// ENABLE (nSLEEP) level that energises the driver. The MP6500 sleeps when
+/// nSLEEP is low, so this is high; fit an external pull-down so that a reset
+/// or unpowered microcontroller leaves the motor de-energised.
+pub const STATOR_ENABLE_ACTIVE_HIGH: bool = true;
+
+/// Opto sensor level seen on the retracted side of the datum edge. The sensor
+/// is an edge rather than a vane, so this level alone says which side of the
+/// datum the stage is on.
+pub const STATOR_OPTO_HIGH_WHEN_RETRACTED: bool = true;
+
+/// Time for the MP6500 to wake from sleep before the first step. Generous
+/// against the part's specification; this path is never time-critical.
+pub const STATOR_WAKE_MS: u64 = 5;
+
+/// How long to hold current after a move before de-energising, when
+/// `rig_stator_hold` is zero. Long enough for the mechanism to stop ringing.
+pub const STATOR_HOLD_AFTER_MOVE_MS: u64 = 1000;
+
+/// Default traverse rate. 0.5 mm/s is about 157 full steps per second, safely
+/// below the pull-in rate of a small stepper under load, so no acceleration
+/// ramp is needed. Raising this much will need one.
+pub const STATOR_RATE_MM_S: f32 = 0.5;
+
+/// Homing search rate, and the slow rate for the final approach to the datum.
+/// The slow rate is what the datum's repeatability is bought with.
+pub const STATOR_HOME_FAST_MM_S: f32 = 0.5;
+pub const STATOR_HOME_SLOW_MM_S: f32 = 0.1;
+
+/// Distance retracted past the datum edge before the final slow advance onto
+/// it. Must exceed the sensor's hysteresis and the mechanism's lash.
+pub const STATOR_HOME_BACKOFF_MM: f32 = 0.2;
+
+/// Bound on any homing search. Exceeding it faults rather than continuing,
+/// because the alternative is driving into a hard stop. Must exceed the
+/// travel window's half-width.
+pub const STATOR_SEEK_MAX_MM: f32 = 6.0;
+
+/// Default overshoot for the unidirectional approach. With no preload spring
+/// the stage is only positioned by the spindle pushing it, so this is what
+/// makes a retracting move deterministic at all rather than a refinement.
+/// Measure the real figure at commissioning and replace this.
+pub const STATOR_BACKLASH_MM: f32 = 0.25;
+
+/// Soft travel window, as offsets from the datum. Deliberately conservative
+/// and set before the geometry was known; replace with measured figures at
+/// commissioning. Targets outside it are rejected, not clamped.
+pub const STATOR_TRAVEL_BELOW_DATUM_MM: f32 = 5.0;
+pub const STATOR_TRAVEL_ABOVE_DATUM_MM: f32 = 5.0;
+
+/// Bounds accepted for the corresponding runtime parameters. A rate above a
+/// few mm/s would need an acceleration ramp, which this axis does not
+/// implement, and a backlash allowance of more than a couple of millimetres
+/// means something mechanical is wrong rather than needing compensation.
+pub const MAX_STATOR_RATE_MM_S: f32 = 3.0;
+pub const MAX_STATOR_BACKLASH_MM: f32 = 2.0;
+
+/// Barrel reading at the opto datum, in mm. Zero until measured by hand at
+/// commissioning; `rig_stator_datum` overrides it at runtime, and like
+/// `LASER_RANGE_MM` that override is not persisted across a reflash.
+pub const STATOR_DATUM_MM: f32 = 0.0;
+
+/// Hold current between moves by default. Zero de-energises, which is the
+/// quieter state for a rig measuring a sense coil at the microvolt level, and
+/// is safe because the micrometer's thread is self-locking.
+pub const STATOR_HOLD_DEFAULT: f32 = 0.0;
+
 /// optoNCDT measuring-rate command matched to the hardware sample clock.
 ///
 /// The sensor command uses kHz, and must end in LF.

@@ -24,15 +24,29 @@ use helic_rt::{Rig, SampleRate};
 use static_cell::StaticCell;
 
 use crate::board::MagnetoelasticParts;
+// Rig-owned compile-time constants. Those whose names would otherwise collide
+// with the atomics of the same meaning in `telemetry` are aliased, following
+// the existing `LASER_RANGE_MM` precedent: the constant is the default, the
+// atomic is the live value.
 use crate::config::{
     DAC_OUT_CEILING_V, DAC_OUT_FLOOR_V, DISPLACEMENT_MAX_MM, DISPLACEMENT_MIN_MM,
-    LASER_RANGE_MM as DEFAULT_LASER_RANGE_MM, LASER_STALE_AFTER_S, OUTPUT_CHANNEL,
+    LASER_RANGE_MM as DEFAULT_LASER_RANGE_MM, LASER_STALE_AFTER_S, MAX_STATOR_BACKLASH_MM,
+    MAX_STATOR_RATE_MM_S, OUTPUT_CHANNEL, STATOR_BACKLASH_MM as DEFAULT_STATOR_BACKLASH_MM,
+    STATOR_DATUM_MM as DEFAULT_STATOR_DATUM_MM, STATOR_HOLD_DEFAULT,
+    STATOR_RATE_MM_S as DEFAULT_STATOR_RATE_MM_S, STATOR_SEEK_MAX_MM,
 };
-use crate::telemetry::{LASER_FRAMES_RECEIVED, LASER_RANGE_MM, LASER_VALUE};
+use crate::stator::{issue_command, CMD_HOME, CMD_JOG, CMD_MOVE, CMD_STOP};
+use crate::telemetry::{
+    LASER_FRAMES_RECEIVED, LASER_RANGE_MM, LASER_VALUE, STATOR_BACKLASH_MM, STATOR_DATUM_MM,
+    STATOR_HOLD, STATOR_JOG_MM, STATOR_POSITION_MM, STATOR_RATE_MM_S, STATOR_TARGET_MM,
+};
 
 /// Index of the laser distance within the measured input vector, after the
 /// eight ADC channels. Mirrors the `INPUTS` order and `measure`'s `values[8]`.
 const LASER_INPUT: usize = 8;
+
+/// Index of the stator position, published by the core-0 stepper task.
+const STATOR_INPUT: usize = 9;
 
 /// DAC reference voltage fitted to the interim analogue board.
 pub const DAC_VREF: f32 = 4.096;
@@ -198,6 +212,12 @@ impl Rig for MagnetoelasticRig {
         ("adc6", "V"),
         ("adc7", "V"),
         ("laser", "mm"),
+        // Stator position as a micrometer barrel reading, published by the
+        // core-0 stepper task, so every capture records the gap it was taken
+        // at. Reads NaN until the axis is homed, or after a move was abandoned
+        // part-way through a retract; see `stator.rs`. One relaxed atomic load
+        // per tick is the whole of the stage's cost to the real-time path.
+        ("stator", "mm"),
     ];
     const ACTUATORS: &'static [(&'static str, &'static str)] = &[("out", "V")];
 
@@ -250,7 +270,8 @@ impl Rig for MagnetoelasticRig {
         for (value, raw) in values[..8].iter_mut().zip(self.adc_last) {
             *value = raw as f32 * self.adc_scale;
         }
-        values[8] = f32::from_bits(LASER_VALUE.load(Ordering::Relaxed));
+        values[LASER_INPUT] = f32::from_bits(LASER_VALUE.load(Ordering::Relaxed));
+        values[STATOR_INPUT] = f32::from_bits(STATOR_POSITION_MM.load(Ordering::Relaxed));
     }
 
     #[unsafe(link_section = ".data.ram_func")]
@@ -348,14 +369,45 @@ impl Rig for MagnetoelasticRig {
         self.tick_pin.set_low();
     }
 
+    // Parameters 2 onwards belong to the stator stage, whose task runs on core
+    // 0. They are routed through the rig group only because that is where a
+    // rig's writable parameters live; `set_param` does no more than store an
+    // atomic and, for the two command parameters, bump a sequence number. See
+    // `stator.rs` and `docs/stator-stage.md`.
     fn param_names() -> &'static [&'static str] {
-        &["rig_laser_range", "rig_out_channel"]
+        &[
+            "rig_laser_range",
+            "rig_out_channel",
+            "rig_stator_target",
+            "rig_stator_jog",
+            "rig_stator_home",
+            "rig_stator_stop",
+            "rig_stator_rate",
+            "rig_stator_backlash",
+            "rig_stator_datum",
+            "rig_stator_hold",
+        ]
     }
 
     fn param_defaults() -> &'static [f32] {
-        &[DEFAULT_LASER_RANGE_MM, OUTPUT_CHANNEL as f32]
+        &[
+            DEFAULT_LASER_RANGE_MM,
+            OUTPUT_CHANNEL as f32,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            DEFAULT_STATOR_RATE_MM_S,
+            DEFAULT_STATOR_BACKLASH_MM,
+            DEFAULT_STATOR_DATUM_MM,
+            STATOR_HOLD_DEFAULT,
+        ]
     }
 
+    // Only range validation belongs here, because this is a static function
+    // with no view of the axis. Rejections that depend on state, such as an
+    // absolute move before homing, are made by the stepper task and counted in
+    // `stator_faults` rather than returned as a write error.
     fn normalise_param(id: u16, value: f32) -> Option<f32> {
         match id {
             0 if value.is_finite() && value > 0.0 => Some(value),
@@ -364,6 +416,24 @@ impl Rig for MagnetoelasticRig {
             // neither may be selected as the driven output. Only the wired
             // channel is accepted; any other request is rejected.
             1 if value == OUTPUT_CHANNEL as f32 => Some(value),
+            // Target and datum are barrel readings, so any finite value is
+            // syntactically fine; the soft travel window is enforced against
+            // the datum by the task, which knows where the axis actually is.
+            2 | 8 if value.is_finite() => Some(value),
+            // A jog is bounded by the same distance that bounds a homing
+            // search, so a mistyped one cannot traverse the micrometer.
+            3 if value.is_finite() && value.abs() <= STATOR_SEEK_MAX_MM => Some(value),
+            // Home and stop are triggers: any finite value is accepted and a
+            // non-zero one acts.
+            4 | 5 if value.is_finite() => Some(value),
+            // Rates above a few mm/s would need an acceleration ramp, which
+            // this axis does not implement.
+            6 if value.is_finite() && value > 0.0 && value <= MAX_STATOR_RATE_MM_S => Some(value),
+            // Zero is not allowed: the final advance onto the target is what
+            // makes an unpreloaded stage deterministic, so there is no such
+            // thing as an approach with no overshoot.
+            7 if value.is_finite() && value > 0.0 && value <= MAX_STATOR_BACKLASH_MM => Some(value),
+            9 if value == 0.0 || value == 1.0 => Some(value),
             _ => None,
         }
     }
@@ -373,6 +443,20 @@ impl Rig for MagnetoelasticRig {
         match id {
             0 => LASER_RANGE_MM.store(value.to_bits(), Ordering::Relaxed),
             1 => self.output_channel = value as usize,
+            2 => {
+                STATOR_TARGET_MM.store(value.to_bits(), Ordering::Relaxed);
+                issue_command(CMD_MOVE);
+            }
+            3 => {
+                STATOR_JOG_MM.store(value.to_bits(), Ordering::Relaxed);
+                issue_command(CMD_JOG);
+            }
+            4 if value != 0.0 => issue_command(CMD_HOME),
+            5 if value != 0.0 => issue_command(CMD_STOP),
+            6 => STATOR_RATE_MM_S.store(value.to_bits(), Ordering::Relaxed),
+            7 => STATOR_BACKLASH_MM.store(value.to_bits(), Ordering::Relaxed),
+            8 => STATOR_DATUM_MM.store(value.to_bits(), Ordering::Relaxed),
+            9 => STATOR_HOLD.store(value.to_bits(), Ordering::Relaxed),
             _ => {}
         }
     }

@@ -41,7 +41,10 @@ default_host = "192.168.1.235"
 # The smoke-test set pairs the commanded output with the loopback that
 # observes it (`drive`, the exciter controller's differential input) and the
 # specimen-side measurement (`coil`).
-capture_sources = ["coil", "drive", "out"]
+# `stator` is the core-0 stepper axis's published position, included so the
+# regression exercises the source the axis added rather than only the analogue
+# ones. It reads NaN until the axis is homed.
+capture_sources = ["coil", "drive", "out", "stator"]
 wired = true
 # The fitted Ethernet controller, which the default build already targets.
 default_board = "w5500"

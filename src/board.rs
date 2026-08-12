@@ -3,10 +3,13 @@
 //!
 //! WIZnet reserves GP16–21 and GP25. This rig assigns GP0/1 to the optoNCDT
 //! UART; GP2–8 and GP13 to the AD7609; GP9–12 and GP15 to the shared ADC/DAC
-//! SPI path; and GP14 to the tick timing output. Behaviour lives in `rig.rs`.
+//! SPI path; GP14 to the tick timing output; and GP22 and GP26–28 to the
+//! stator stepper. Behaviour lives in `rig.rs` and `stator.rs`.
 
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{CORE1, PIN_0, PIN_1, PIN_7, PIN_8, PWM_SLICE4, SPI1, UART0};
+use embassy_rp::peripherals::{
+    CORE1, PIN_0, PIN_1, PIN_22, PIN_7, PIN_8, PIO0, PWM_SLICE4, SPI1, UART0,
+};
 use embassy_rp::spi::{self, Async, Blocking, Spi};
 use embassy_rp::{Peri, Peripherals};
 use helic_drivers::ad7609::ConfigPins;
@@ -17,8 +20,24 @@ pub struct Board {
     pub led: Output<'static>,
     pub rt: MagnetoelasticParts,
     pub laser: LaserParts,
+    pub stator: StatorParts,
     pub eth: EthernetParts,
     pub core1: Peri<'static, CORE1>,
+}
+
+/// Stator stepper resources, owned by the core-0 task in `stator.rs`.
+///
+/// The PIO instance is unassembled here because its state machine is loaded on
+/// core 0; the DIR and ENABLE outputs start in their inactive states, so the
+/// driver is de-energised and no direction is asserted until a move begins.
+/// The opto sensor is pulled up, as its output is assumed open-collector until
+/// measured.
+pub struct StatorParts {
+    pub pio: Peri<'static, PIO0>,
+    pub step: Peri<'static, PIN_22>,
+    pub dir: Output<'static>,
+    pub enable: Output<'static>,
+    pub opto: Input<'static>,
 }
 
 /// UART resources assembled on core 0, where the interrupt token is available.
@@ -91,6 +110,27 @@ impl Board {
                 uart: p.UART0,
                 tx: p.PIN_0,
                 rx: p.PIN_1,
+            },
+            stator: StatorParts {
+                pio: p.PIO0,
+                step: p.PIN_22,
+                dir: Output::new(
+                    p.PIN_26,
+                    if crate::config::STATOR_DIR_ADVANCE_HIGH {
+                        Level::Low
+                    } else {
+                        Level::High
+                    },
+                ),
+                enable: Output::new(
+                    p.PIN_28,
+                    if crate::config::STATOR_ENABLE_ACTIVE_HIGH {
+                        Level::Low
+                    } else {
+                        Level::High
+                    },
+                ),
+                opto: Input::new(p.PIN_27, Pull::Up),
             },
             eth: EthernetParts {
                 spi: eth_spi,

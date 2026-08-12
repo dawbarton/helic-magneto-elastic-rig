@@ -24,8 +24,8 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::block::ImageDef;
 use embassy_rp::gpio::Output;
 use embassy_rp::multicore::{spawn_core1, Stack as CoreStack};
-use embassy_rp::peripherals::{DMA_CH2, DMA_CH3, UART0};
-use embassy_rp::uart;
+use embassy_rp::peripherals::{DMA_CH2, DMA_CH3, PIO0, UART0};
+use embassy_rp::{pio, uart};
 use embassy_time::Timer;
 use helic_core::{DoubleBuffer, FourierCoeffs, TableBuffer};
 use helic_fw_rt::rt_loop as shared_rt;
@@ -44,6 +44,8 @@ use static_cell::{ConstStaticCell, StaticCell};
 mod board;
 mod config;
 mod rig;
+mod stator;
+mod step_pio;
 mod telemetry;
 
 use board::LaserParts;
@@ -66,6 +68,9 @@ bind_interrupts!(pub struct Irqs {
     TIMER0_IRQ_1 => helic_fw_support::time_watchdog::TimeWatchdogHandler;
     DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH2>,
         embassy_rp::dma::InterruptHandler<DMA_CH3>;
+    // Wakes the stator task when the step generator's TX FIFO has room. The
+    // PIO belongs entirely to core 0.
+    PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
 });
 
 // Embedded async tasks live for the whole firmware run. StaticCell performs a
@@ -100,10 +105,17 @@ fn main() -> ! {
     // Taking `Peripherals` gives this function unique ownership of every RP2350
     // peripheral. `Board::new` then divides those resources by task and core.
     let p = embassy_rp::init(Default::default());
-    telemetry::LASER_RANGE_MM.store(
-        config::LASER_RANGE_MM.to_bits(),
-        core::sync::atomic::Ordering::Relaxed,
-    );
+    // Seed the atomics that shadow a writable parameter with their
+    // compile-time defaults, so the live value and the host-visible default
+    // agree before the host writes anything.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        telemetry::LASER_RANGE_MM.store(config::LASER_RANGE_MM.to_bits(), Relaxed);
+        telemetry::STATOR_RATE_MM_S.store(config::STATOR_RATE_MM_S.to_bits(), Relaxed);
+        telemetry::STATOR_BACKLASH_MM.store(config::STATOR_BACKLASH_MM.to_bits(), Relaxed);
+        telemetry::STATOR_DATUM_MM.store(config::STATOR_DATUM_MM.to_bits(), Relaxed);
+        telemetry::STATOR_HOLD.store(config::STATOR_HOLD_DEFAULT.to_bits(), Relaxed);
+    }
     info!("boot: {} (platform {})", IDENTITY.banner, IDENTITY.platform);
 
     let b = board::Board::new(p);
@@ -181,6 +193,10 @@ fn main() -> ! {
         // the line in the idle (mark) state so a disconnected/quiet sensor
         // just parks in `rx.read().await`. See `notes.md`.
         spawner.spawn(unwrap!(laser_task(b.laser)));
+        // The stator stage is a core-0 axis: its step pulses come from PIO0 and
+        // its only contact with core 1 is the position word that `measure`
+        // reads. See `docs/stator-stage.md`.
+        spawner.spawn(unwrap!(stator::stator_task(b.stator, &RT_SHARED)));
         spawner.spawn(unwrap!(status_task()));
     });
 }
