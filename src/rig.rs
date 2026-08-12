@@ -14,6 +14,8 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use fixed::traits::ToFixed;
 use helic_core::safety::{clamp_channel_command, StaleCounter};
+#[cfg(not(feature = "diag-skip-dac"))]
+use helic_drivers::ad5064::WORD_SETTLE_US;
 use helic_drivers::ad5064::{Ad5064, ChannelPolarity};
 use helic_drivers::ad7609::Ad7609;
 use helic_fw_rt::analog_spi::{HotSpiConfig, RawSpiDevice, SramAd5064};
@@ -36,14 +38,17 @@ const LASER_INPUT: usize = 8;
 pub const DAC_VREF: f32 = 4.096;
 
 /// Common-mode voltage for the exciter's differential current-controller
-/// input. Both the driven channel (A) and the fixed negative reference (C)
-/// rest here so that a logical output of zero produces zero differential
-/// drive. Exact half-scale of the unipolar DAC (2.048 V).
+/// input. Both channels rest here so that a logical output of zero produces
+/// zero differential drive. Exact half-scale of the unipolar DAC (2.048 V).
 pub const MID_RAIL: f32 = DAC_VREF / 2.0;
 
 /// DAC channel wired to the negative differential input of the exciter
-/// current controller (AD5064 channel C). Held constant at `MID_RAIL`; it is
-/// never driven by the real-time loop.
+/// current controller (AD5064 channel C). Driven symmetrically with the
+/// positive channel (A) every tick: `MID_RAIL - out` against A's
+/// `MID_RAIL + out`, so the differential swing is `2 * out` rather than the
+/// `out` available from driving A alone against a fixed reference. This
+/// doubles the achievable output range within the same 0-4.096 V unipolar
+/// DAC rail.
 pub const NEG_REF_CHANNEL: usize = 2;
 
 // Raw chip-select access is the one place pin identity cannot be recovered
@@ -60,6 +65,23 @@ pub const DAC_POLARITY: [ChannelPolarity; 4] = [
     ChannelPolarity::Unipolar,
     ChannelPolarity::Unipolar,
 ];
+
+/// Busy-wait for the AD5064's inter-word settling time
+/// ([`WORD_SETTLE_US`]) between the two channel writes `actuate` issues per
+/// tick (see the timing note in the helic-drivers ad5064 module; a
+/// single-channel-per-tick write was previously spaced by the tick period
+/// itself, which no longer holds once two words are issued per tick). Reads
+/// the RP2350's always-on, free-running microsecond timer directly, rather
+/// than a flash-resident delay routine, so the wait stays exact regardless
+/// of any XIP cache stall elsewhere in the tick (see analog_spi.rs's module
+/// note on why the hot path avoids flash).
+#[cfg(not(feature = "diag-skip-dac"))]
+#[inline(always)]
+#[unsafe(link_section = ".data.ram_func")]
+fn wait_word_settle() {
+    let start = pac::TIMER0.timerawl().read();
+    while pac::TIMER0.timerawl().read().wrapping_sub(start) < WORD_SETTLE_US {}
+}
 
 type SpiBus = Mutex<NoopRawMutex, RefCell<Spi<'static, SPI1, Blocking>>>;
 type SpiDevice =
@@ -180,14 +202,14 @@ impl Rig for MagnetoelasticRig {
         // Define every DAC output before the RT loop starts, spacing the writes
         // for the AD5064's inter-word settling time (see the timing note in the
         // helic-drivers ad5064 module). Channels A and C (the exciter's
-        // differential inputs) rest at the common-mode reference so the
+        // differential inputs) both rest at the common-mode reference so the
         // differential drive (A - C) is zero until the first `actuate`; unused B
         // and D rest at 0 V. C is written before A so the driven channel settles
         // to match the reference last. Output routing is locked to A, so the
         // remaining unused channels are the fixed indices 1 (B) and 3 (D).
         let startup_setpoints = [
-            (NEG_REF_CHANNEL, MID_RAIL),     // C: negative differential reference
-            (self.output_channel, MID_RAIL), // A: driven channel; rest = zero drive
+            (NEG_REF_CHANNEL, MID_RAIL),     // C: negative differential channel
+            (self.output_channel, MID_RAIL), // A: positive differential channel
             (1, 0.0),                        // B: broken, held defined
             (3, 0.0),                        // D: unused
         ];
@@ -221,13 +243,21 @@ impl Rig for MagnetoelasticRig {
         let out = outputs[0];
         #[cfg(feature = "diag-skip-dac")]
         let _ = out;
-        // Bias the logical command onto the common-mode reference so `out` is
-        // the signed differential drive (A - C): out = 0 rests at MID_RAIL,
-        // matching channel C. No sign inversion (A up = more drive). The DAC
-        // driver clamps the final voltage into the unipolar 0-4.096 V range.
+        // Drive A and C symmetrically about the common-mode reference so
+        // `out` is half the signed differential drive (A - C) = 2 * out:
+        // out = 0 rests both channels at MID_RAIL. No sign inversion (A up,
+        // C down = more drive). Each channel is independently clamped into
+        // the unipolar 0-4.096 V range by the DAC driver; `clamp_output`
+        // keeps `out` within the symmetric margin that keeps both channels
+        // inside that range. The two words are spaced by `wait_word_settle`
+        // to respect the AD5064's inter-word settling time.
         #[cfg(not(feature = "diag-skip-dac"))]
-        self.dac_raw
-            .write_volts(self.output_channel, MID_RAIL + out);
+        {
+            self.dac_raw
+                .write_volts(self.output_channel, MID_RAIL + out);
+            wait_word_settle();
+            self.dac_raw.write_volts(NEG_REF_CHANNEL, MID_RAIL - out);
+        }
     }
 
     #[unsafe(link_section = ".data.ram_func")]
@@ -252,11 +282,13 @@ impl Rig for MagnetoelasticRig {
     #[unsafe(link_section = ".data.ram_func")]
     fn clamp_output(&self, actuator: usize, out: f32) -> f32 {
         debug_assert_eq!(actuator, 0);
-        // Hard amplitude ceiling: clamp the logical differential command so
-        // the driven channel voltage `MID_RAIL + out` stays inside the safe
-        // DAC window. Applied after the controller/forcing/table sum, so no
-        // single stage can push the exciter past it. The AD5064 driver's own
-        // 0-4.096 V clamp remains as a final backstop.
+        // Hard amplitude ceiling: clamp the logical command so both driven
+        // channel voltages, `MID_RAIL + out` (A) and `MID_RAIL - out` (C),
+        // stay inside the safe DAC window. `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V`
+        // are symmetric about `MID_RAIL`, so the same bound on `out` protects
+        // both channels. Applied after the controller/forcing/table sum, so
+        // no single stage can push the exciter past it. The AD5064 driver's
+        // own 0-4.096 V clamp remains as a final backstop.
         clamp_channel_command(out, MID_RAIL, DAC_OUT_FLOOR_V, DAC_OUT_CEILING_V)
     }
 
@@ -264,7 +296,7 @@ impl Rig for MagnetoelasticRig {
     #[unsafe(link_section = ".data.ram_func")]
     fn safe_output(&self, actuator: usize) -> f32 {
         debug_assert_eq!(actuator, 0);
-        // Logical zero → channel A at MID_RAIL → zero differential drive.
+        // Logical zero → A and C both at MID_RAIL → zero differential drive.
         0.0
     }
 

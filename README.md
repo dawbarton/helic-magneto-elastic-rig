@@ -19,10 +19,12 @@ this repository implements.
 
 - AD7609 eight-channel simultaneous ADC on SPI1. PWM-driven CONVST supplies
   the hardware sample clock and the BUSY falling edge starts each RT tick.
-- AD5064 four-channel DAC on the same core-1 SPI bus. Channel A drives the
-  exciter's differential current-controller input and channel C holds the
-  matching negative reference; the fitted output stages are all unipolar, so
-  a logical output of zero rests both at the 2.048 V common-mode point.
+- AD5064 four-channel DAC on the same core-1 SPI bus. Channels A and C are the
+  exciter's differential current-controller inputs, driven symmetrically about
+  the 2.048 V common-mode point (`MID_RAIL + out` on A, `MID_RAIL - out` on C),
+  so the differential drive is twice the logical command. The fitted output
+  stages are all unipolar, so a logical output of zero rests both channels at
+  that common-mode point.
 - optoNCDT laser on UART0 TX/RX through separate TTL↔RS422 paths. The firmware
   configures the measuring rate and distance-only RS422 output at startup. A
   disconnected input requires the external 10 kΩ pull-up on GP1 described in
@@ -41,8 +43,8 @@ opts into the platform's per-tick output safety gate (`SAFETY_GATED = true`).
 The gate runs after the controller, forcing and table sum, and before the DAC
 write:
 
-- the commanded channel voltage is clamped into the window set by
-  `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V` in `src/config.rs`;
+- the logical command is clamped so both driven channel voltages stay inside
+  the window set by `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V` in `src/config.rs`;
 - tip displacement outside `DISPLACEMENT_MIN_MM`–`DISPLACEMENT_MAX_MM`, a
   non-finite reading, or a laser feed that stops advancing for
   `LASER_STALE_AFTER_S` latches a fault and quiets the actuator;

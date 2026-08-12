@@ -29,11 +29,32 @@ change of analogue board, specimen, or exciter.
   free-runs into a framing/break interrupt storm that livelocks core 0. The
   symptom is a rig that boots and then stops answering on the network.
 - **Analogue output stages.** The fitted cape is all-unipolar, and
-  `DAC_POLARITY` in `src/rig.rs` is set to match. Channel A drives the
-  exciter's positive differential input and channel C holds the negative
-  reference at the 2.048 V common mode; channel B is broken and channel D is
-  unused, so both rest at 0 V. Output routing is fixed to channel A and
-  `rig_out_channel` will reject any other value.
+  `DAC_POLARITY` in `src/rig.rs` is set to match. Channels A and C are the
+  exciter's differential inputs and are driven symmetrically about the
+  2.048 V common mode (`MID_RAIL + out` on A, `MID_RAIL - out` on C). This
+  doubles the topology's achievable differential amplitude, from ±2.048 V
+  (only A varying, over its own 0-4.096 V rail, against a fixed C) to the full
+  ±4.096 V of the DAC reference; channel B is broken and channel D is unused,
+  so both rest at 0 V. Output routing is fixed to channel A and
+  `rig_out_channel` will reject any other value. The actual operating range
+  stays clamped to ±1.952 V on `out` (±3.904 V differential) by
+  `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V` in `src/config.rs`, an unchanged,
+  deliberate 0.096 V headroom below each rail; only the topology ceiling
+  doubled, not that software margin. Before 2026-08-12, C was held constant at
+  `MID_RAIL` and only A varied.
+- **Two DAC words per tick.** Driving A and C symmetrically means `actuate`
+  writes two AD5064 words per tick, and the part needs ~3 µs between
+  consecutive words. A single write per tick was spaced by the tick period
+  itself; two are not, so `wait_word_settle` in `src/rig.rs` busy-waits on the
+  always-on microsecond timer between them. It costs ~6 µs of the tick budget
+  (see the 2026-08-12 bring-up below). Do not remove it, and do not replace it
+  with an `embassy-time` delay: the tick path is Embassy-free and
+  SRAM-resident.
+- **ADC input 0 wiring.** As of 2026-08-12, `adc0` reads a voltage from a coil
+  wound around the stator, not the actuator controller's current-sense output
+  as it did previously. Calibration/interpretation of `adc0` in any analysis
+  downstream of this date must account for the change; data captured before it
+  is current, not stator coil voltage.
 - **Laser measuring rate.** The optoNCDT is configured at startup from
   `SAMPLE_RATE`, and expects the factory 921.6 kBaud setting.
 - **Flashing.** Flash with `cargo run --release`, which uses `probe-rs run`.
