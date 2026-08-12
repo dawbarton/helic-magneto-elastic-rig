@@ -43,6 +43,15 @@ change of analogue board, specimen, or exciter.
 - **Sequential host access.** The control server is single-client. A host
   process killed mid-request leaves the connection held until it times out,
   and the next connection attempt will fail meanwhile.
+- **Interrupted captures leave the rig streaming.** A host tool killed during
+  a capture never sends the stream stop, so the rig keeps sending UDP records
+  at the sample rate to a host that is no longer listening. Observed on
+  2026-08-12: the board then became unreachable from the host (`No route to
+  host`) while defmt showed it perfectly healthy, ticking at 8 kHz with the
+  dropped-record counter climbing. Reflashing, which resets the stream, is the
+  recovery. Let the regression runner finish rather than interrupting it, and
+  space consecutive runs: a run started immediately after the previous one has
+  been seen to time out on its first request.
 
 ## Bring-up evidence
 
@@ -54,6 +63,23 @@ and the `experiment` parameter now report `magnetoelastic`, and the rig profile
 selects it as `--rig magnetoelastic`. Nothing else about the firmware changed,
 and this bring-up exists to show that.
 
-Hardware evidence for this revision is recorded in the following commit, which
-flashes the exact committed tree so that the reported firmware identity names a
-revision that exists.
+Exact clean W5500 firmware `0.1.0 86a5262` reported protocol 3, 42 parameters,
+15 sources at 8 kHz, and safety disarmed at boot (`arm = 0`).
+
+- `helic-rt-regression --profile rig-profile.toml`, flashing the default build:
+  idle, TCP-poll and capture phases at 7999.8–8000.2 ticks/s with zero
+  overruns, tick timeouts, dropped records, lost packets, capture drops or
+  index gaps. `loop_time_max` 38 µs against the profile's 60 µs limit;
+  `wake_phase` 36 µs, `t_measure_max` 19 µs, `t_actuate_max` 4 µs,
+  `t_rest_max` 16 µs.
+- `--no-flash --capture-sources all --capture-samples 8000` on the same image:
+  8000 records of all 15 sources (`adc0`–`adc7`, `laser`, `target`, `forcing`,
+  `table`, `phase`, `out`, `cmd_epoch`) with the same zero counters,
+  7999.5–8000.3 ticks/s and `loop_time_max` 38 µs.
+- Static gates on the same tree: `cargo fmt`, `cargo clippy -D warnings`,
+  `helic-deps-check`, and `helic-rt-layout` against `rig-profile.toml` all
+  passed; the W6100 variant cross-built but was not flashed.
+
+The specimen was not driven: the safety gate stayed disarmed throughout, so
+this is evidence about the acquisition, timing and communications paths, not
+about closed-loop behaviour.
