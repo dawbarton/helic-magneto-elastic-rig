@@ -43,15 +43,19 @@ change of analogue board, specimen, or exciter.
 - **Sequential host access.** The control server is single-client. A host
   process killed mid-request leaves the connection held until it times out,
   and the next connection attempt will fail meanwhile.
-- **A silent laser takes the rig off the network.** When the optoNCDT stops
-  answering, the platform's driver probes baud rates about four times a second
-  and does not stop. Measured on 2026-08-12: in that state `records_dropped`
+- **A silent laser has twice taken the rig off the network.** When the
+  optoNCDT stops answering, the platform's driver probes baud rates about four
+  times a second and does not stop. On 2026-08-12 the rig twice became absent
+  from the host (`No route to host`, or connections that time out) while defmt
+  showed core 1 ticking normally at 8 kHz; in that state `records_dropped`
   climbed to 833369 with streaming *off*, so core 0 was not draining the ring
-  every 5 ms and the network stack was not being serviced either. The rig then
-  looks absent from the host (`No route to host`, or connections that time
-  out) while defmt shows core 1 ticking normally at 8 kHz. A reset appears to
-  fix it but only buys time; the sensor is what needs attention. This is an
-  open platform defect, recorded in the HELIC-DAQ repository's `notes.md`.
+  and the network stack was not being serviced. A reset clears it.
+  The probe loop alone is not sufficient, though: with the same silent sensor
+  later the same afternoon, the probing continued at about five per second
+  while drops stayed at zero and the full regression passed. Treat a silent
+  sensor as the precondition and check it, and its GP1 pull-up, physically.
+  Open platform defect, with the evidence in the HELIC-DAQ repository's
+  `notes.md`.
 - **Interrupted captures do not leave the rig streaming.** An earlier revision
   of this file said they did. They do not: killing a client sends a FIN and
   the control server stops the stream in the same defmt millisecond. Since
@@ -88,3 +92,32 @@ Exact clean W5500 firmware `0.1.0 86a5262` reported protocol 3, 42 parameters,
 The specimen was not driven: the safety gate stayed disarmed throughout, so
 this is evidence about the acquisition, timing and communications paths, not
 about closed-loop behaviour.
+
+### Platform upgrade to v0.1.3 (2026-08-12)
+
+Repinned from `v0.1.2`. A patch release, so no rig code changed; the control
+link now uses a 2 s TCP keep-alive with a 10 s timeout instead of a 30 s
+timeout with no probes.
+
+Exact clean W5500 firmware `0.1.0 a594cc5`, built against the tag:
+
+- an idle control connection that this rig reset after exactly 30.0 s before
+  the upgrade was still open after 90 s, so an arm-and-hold session no longer
+  needs to poll to stay connected;
+- `helic-rt-regression --profile rig-profile.toml --no-flash` passed every
+  phase at 7999.9–8000.3 ticks/s with zero overruns, tick timeouts, dropped
+  records, lost packets, capture drops or index gaps, and `loop_time_max`
+  37 µs against the unchanged 60 µs limit;
+- `cargo fmt`, release clippy, `helic-deps-check` and `helic-rt-layout` all
+  passed against the repinned tree, and the W6100 variant cross-built.
+
+The comms-loss window that disarms the output and stops the stream after a
+host vanishes without closing its connection is now about 10 s rather than 30.
+That path was not exercised directly: making this host stop answering without
+closing the connection needs privileges not available here, so the bound rests
+on the keep-alive mechanism, whose live half is what the 90 s test above
+demonstrates.
+
+The laser was not answering during this session (`laser_frames_received` = 0,
+`safety` = 10, i.e. tripped and quieting). The figures above are therefore
+evidence about the acquisition, timing and communications paths only.
