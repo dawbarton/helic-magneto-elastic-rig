@@ -43,19 +43,22 @@ change of analogue board, specimen, or exciter.
 - **Sequential host access.** The control server is single-client. A host
   process killed mid-request leaves the connection held until it times out,
   and the next connection attempt will fail meanwhile.
-- **A silent laser has twice taken the rig off the network.** When the
-  optoNCDT stops answering, the platform's driver probes baud rates about four
-  times a second and does not stop. On 2026-08-12 the rig twice became absent
-  from the host (`No route to host`, or connections that time out) while defmt
-  showed core 1 ticking normally at 8 kHz; in that state `records_dropped`
-  climbed to 833369 with streaming *off*, so core 0 was not draining the ring
-  and the network stack was not being serviced. A reset clears it.
-  The probe loop alone is not sufficient, though: with the same silent sensor
-  later the same afternoon, the probing continued at about five per second
-  while drops stayed at zero and the full regression passed. Treat a silent
-  sensor as the precondition and check it, and its GP1 pull-up, physically.
-  Open platform defect, with the evidence in the HELIC-DAQ repository's
-  `notes.md`.
+- **A switched-off laser can take the rig off the network.** With the optoNCDT
+  powered down, the platform driver probes baud rates about four times a second
+  without bound. Observed on 2026-08-12: `records_dropped` climbed at roughly
+  6000/s with streaming *off*, meaning core 0 was not draining the record ring
+  and the network stack was not being serviced, so the rig went absent from the
+  host (`No route to host`, or connections that time out) while defmt showed
+  core 1 ticking normally at 8 kHz. A reset clears it. The probing alone is not
+  sufficient, though: later the same afternoon, with the sensor still off, the
+  probing continued while drops stayed at zero and the full regression passed.
+  Switching the sensor off is a legitimate thing to do, so treat this as a
+  platform defect rather than a rule about how to use the rig; the evidence is
+  in the HELIC-DAQ repository's `notes.md`.
+- **One unreachable episode is still unexplained.** An earlier episode the same
+  day had the laser streaming normally and the record ring being drained, and
+  the rig was invisible from the host anyway. If it recurs, attach the probe
+  and inspect before resetting: a reset destroys the evidence.
 - **Interrupted captures do not leave the rig streaming.** An earlier revision
   of this file said they did. They do not: killing a client sends a FIN and
   the control server stops the stream in the same defmt millisecond. Since
@@ -118,6 +121,9 @@ closing the connection needs privileges not available here, so the bound rests
 on the keep-alive mechanism, whose live half is what the 90 s test above
 demonstrates.
 
-The laser was not answering during this session (`laser_frames_received` = 0,
-`safety` = 10, i.e. tripped and quieting). The figures above are therefore
-evidence about the acquisition, timing and communications paths only.
+The laser was switched off partway through this session, so
+`laser_frames_received` stayed at 0 and `safety` read 10: the gate had latched
+a trip and was quieting the actuator, which is the designed response to a blind
+feedback path. The figures above are therefore evidence about the acquisition,
+timing and communications paths only, and the laser path is neither confirmed
+nor called into question by them.
