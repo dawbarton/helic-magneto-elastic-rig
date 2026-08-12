@@ -21,6 +21,21 @@ deliberately does not do. Hardware evidence belongs in `notes.md`, not here.
   mechanism is always left in the same contact state.
 - Absolute position is meaningful only after homing. Before that, absolute
   moves are refused and the reported position is `NaN`.
+- The datum sits at one extreme of travel, with a hard stop just past it.
+  Homing bounds how far it goes into that clearance, always moves away from
+  the stop first, and refuses to run at all in the geometry where the
+  configured backoff would not fit.
+
+### One thing still to establish
+
+**Does the opto flag ride on the stage, or on the spindle or motor?** If it
+moves with the spindle, the datum is repeatable regardless of approach
+direction, because a screw is deterministic even when the stage it pushes is
+not, and the advance-only rule would be needed for positioning but not for
+homing. If it moves with the stage, the rule applies to homing too. The
+firmware assumes the stricter case, which costs a little homing time and is
+correct either way. The measured 1/1000 inch repeatability is consistent with
+both, so it does not settle the question.
 
 ## Hardware
 
@@ -241,19 +256,49 @@ This follows the same convention as `rig_laser_range`.
 
 ### Homing
 
-Homing is the only way the axis learns where it is. The sequence:
+Homing is the only way the axis learns where it is, and it is the most delicate
+thing the axis does, because **the datum sits at one extreme of travel**. There
+is a hard stop just past the edge, and only a short clearance between the two.
 
-1. Energise the driver and wait for it to wake.
-2. If the opto sensor says the stage is on the advanced side of the edge,
-   retract at the fast rate until it crosses back.
-3. Retract a further `STATOR_HOME_BACKOFF_MM` to clear the edge and any lash.
-4. Advance at the slow rate until the edge is crossed. That point is the datum,
-   and the step counter is zeroed there.
+Two constraints have to hold at once:
 
-The final motion is always a slow advance, which is what makes the datum
-repeatable and leaves the mechanism in the standard contact state. Every search
-is bounded by `STATOR_SEEK_MAX_MM`; exceeding it faults rather than continuing,
-since the alternative is driving into a hard stop.
+- the datum must be latched **during an advance**, because that is the only
+  motion that positions an unpreloaded stage;
+- the sequence must bound how far it ever intrudes into the clearance.
+
+Which of these is awkward depends on the geometry, described by
+`STATOR_DATUM_AT_ADVANCED_EXTREME`:
+
+**Datum at the advanced extreme.** Advancing already points at the edge. Homing
+retreats into the open working range, clears the edge by
+`STATOR_HOME_BACKOFF_MM`, then advances onto it and stops. The retreat happens
+in open travel and the intrusion into the clearance is a single step. This is
+the easy case.
+
+**Datum at the retracted extreme.** Advancing points away from the edge, so
+homing has to enter the clearance, retreat into it by the backoff, and advance
+back out onto the edge. Every part of the final approach is inside the
+clearance, so `STATOR_DATUM_CLEARANCE_MM` must be comfortably larger than
+`STATOR_HOME_BACKOFF_MM`. **Homing refuses to run when it is not**, rather than
+homing by driving into the stop.
+
+In both cases the first thing homing does is check whether the stage is already
+in the clearance and, if so, leave it, moving away from the hard stop. So the
+first motion of a blind home is always away from the stop, whichever side of
+the edge the stage powered up on.
+
+Both approaches step **one at a time, waiting for each pulse to be executed**
+rather than queuing them. This matters more than it looks: at the FIFO's eight
+queued steps, the sensor would be read up to eight steps ahead of the
+mechanism, which at full step is 25 µm, the size of the entire datum
+repeatability budget. Stepping in lockstep with the mechanism reduces the
+overshoot to one step.
+
+Every search is bounded by `STATOR_SEEK_MAX_MM`, derived from the travel so the
+edge is reachable from wherever the stage powered up. Exceeding it faults, and
+because the failure mode of a dead or disconnected sensor is to travel that
+far into a stop, the current-limit potentiometer is what makes it a stall
+rather than damage.
 
 The opto sensor is an **edge**, not a vane, so its state alone says which side
 of the datum the stage is on and the search cannot get lost past a narrow flag.
@@ -281,6 +326,12 @@ quiescent by inspection.
 Do these in order, once, at commissioning, and record the results in
 `notes.md`.
 
+**0. Establish the datum geometry.** Which extreme of travel the datum sits at,
+expressed as `STATOR_DATUM_AT_ADVANCED_EXTREME`, and how much clearance lies
+between the edge and the hard stop. Homing cannot be run safely without both.
+Determine which side the sensor changes on by hand, before the motor is
+coupled, and confirm `STATOR_OPTO_HIGH_BEYOND_DATUM` with a meter.
+
 **1. Confirm the microstepping strapping by inspection**, and set
 `STATOR_MICROSTEPS` to match. Do this before anything moves.
 
@@ -307,11 +358,20 @@ same-direction approach to get hysteresis alone, and subtract. Set
 `rig_stator_backlash` comfortably above the result, and update the default in
 `src/config.rs`. Without a preload spring, expect this to be large.
 
-**6. Travel limits.** With the datum established, find the usable travel by
-hand, and set `STATOR_TRAVEL_BELOW_DATUM_MM` and `STATOR_TRAVEL_ABOVE_DATUM_MM`
-to a conservative subset of it. They default to ±5 mm about the datum, which is
-a guess made before the geometry was known and should be replaced by a measured
-figure.
+**6. Travel limits.** Two numbers, both measured by hand once the datum is
+established. `STATOR_DATUM_CLEARANCE_MM` is the travel between the datum edge
+and the hard stop just past it, and it bounds everything homing does inside
+that clearance. `STATOR_TRAVEL_RANGE_MM` is the working travel on the far side.
+Both default to guesses made before the geometry was known, 0.5 mm and 5 mm.
+Measure the clearance **before the first home**, since it is what decides
+whether homing is safe at all in the retracted-extreme geometry.
+
+The soft window is derived from these and is one-sided: all of the operating
+travel lies on the working side of the datum, and the clearance is run-out for
+homing rather than travel to operate in. One consequence follows from combining
+that with the unidirectional approach: because a move approaches its target
+from one backlash allowance below, **targets within `rig_stator_backlash` of
+the datum-side limit are unreachable** and are refused.
 
 **7. Lost-step audit.** At the end of each session, re-home and read
 `stator_home_error`. It has a noise floor of about 64 microsteps, so treat
@@ -350,18 +410,17 @@ the claim should be measured rather than asserted.
 ## Safety and interlocks
 
 - **The axis refuses to move while the output safety gate is armed**, and
-  aborts an in-progress move if the gate becomes armed. Moving the stator while
-  the exciter is driving changes the specimen's rest displacement underneath a
-  running controller.
-- **Interaction with the displacement window.** `DISPLACEMENT_MIN_MM` and
-  `DISPLACEMENT_MAX_MM` in `src/config.rs` are a fixed 10–40 mm window about the
-  approximately 25 mm rest point, and the gate latches a fault outside it.
-  Moving the stator moves the specimen's rest displacement, so a stator travel
-  wide enough to push the rest point outside that window will trip the gate on
-  a perfectly healthy rig. Re-check these two constants against the intended
-  stator travel before commissioning. Widening the window weakens the guard; the
-  alternative is to make it relative to a rest point that tracks stator
-  position, which is a firmware change and not currently implemented.
+  aborts an in-progress move if the gate becomes armed. The reason is not the
+  displacement guard, see below, but that the gap is a parameter of the system:
+  moving it under a running controller changes the dynamics beneath that
+  controller, and does so while injecting the driver's switching noise into a
+  live measurement.
+- **No interaction with the displacement window.** The stage moves orthogonally
+  to the beam's motion and to the laser measurement axis, so stator travel does
+  not shift the specimen's rest displacement and
+  `DISPLACEMENT_MIN_MM`/`DISPLACEMENT_MAX_MM` need no revision on account of it.
+  Worth stating explicitly, because the opposite geometry would have forced a
+  choice between widening the window and making it track the stage.
 - **Position does not survive a reboot.** The step counter is RAM state, so the
   axis comes up as not homed and refuses absolute moves until homed.
 - **A reboot request stops the axis** and de-energises the driver.

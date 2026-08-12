@@ -111,10 +111,40 @@ pub const STATOR_DIR_ADVANCE_HIGH: bool = true;
 /// or unpowered microcontroller leaves the motor de-energised.
 pub const STATOR_ENABLE_ACTIVE_HIGH: bool = true;
 
-/// Opto sensor level seen on the retracted side of the datum edge. The sensor
-/// is an edge rather than a vane, so this level alone says which side of the
-/// datum the stage is on.
-pub const STATOR_OPTO_HIGH_WHEN_RETRACTED: bool = true;
+/// Opto sensor level seen beyond the datum edge, that is on the short side
+/// between the edge and the hard stop. The sensor is an edge rather than a
+/// vane, so this level alone says which side of the datum the stage is on.
+pub const STATOR_OPTO_HIGH_BEYOND_DATUM: bool = true;
+
+/// True when advancing moves the stage toward the datum, and so toward the
+/// hard stop just past it.
+///
+/// The datum sits at one **extreme** of travel, so one side of the edge is a
+/// short clearance and the other is the whole working range. Which side is
+/// which decides how homing can reach the edge, because the final motion onto
+/// the datum has to be an advance for the unpreloaded stage to be positioned
+/// by it:
+///
+/// - datum at the advanced extreme (`true`): advancing already points at the
+///   datum, so the approach ends on the edge having intruded into the
+///   clearance by one step;
+/// - datum at the retracted extreme (`false`): advancing points away from the
+///   datum, so homing has to enter the clearance first, by
+///   `STATOR_HOME_BACKOFF_MM`, and advance back onto the edge. That case needs
+///   `STATOR_DATUM_CLEARANCE_MM` to be comfortably the larger of the two, and
+///   homing refuses to run when it is not.
+///
+/// Not yet established for this rig; confirm before the first home.
+pub const STATOR_DATUM_AT_ADVANCED_EXTREME: bool = true;
+
+/// Usable travel between the datum edge and the hard stop just past it.
+/// Deliberately small until measured, because everything that intrudes into
+/// this clearance is bounded against it.
+pub const STATOR_DATUM_CLEARANCE_MM: f32 = 0.5;
+
+/// Working travel on the far side of the datum, away from the hard stop.
+/// Conservative and set before the geometry was known.
+pub const STATOR_TRAVEL_RANGE_MM: f32 = 5.0;
 
 /// Time for the MP6500 to wake from sleep before the first step. Generous
 /// against the part's specification; this path is never time-critical.
@@ -139,9 +169,12 @@ pub const STATOR_HOME_SLOW_MM_S: f32 = 0.1;
 pub const STATOR_HOME_BACKOFF_MM: f32 = 0.2;
 
 /// Bound on any homing search. Exceeding it faults rather than continuing,
-/// because the alternative is driving into a hard stop. Must exceed the
-/// travel window's half-width.
-pub const STATOR_SEEK_MAX_MM: f32 = 6.0;
+/// because the alternative is driving into a hard stop. It has to exceed the
+/// full travel, so that the edge is reachable from wherever the stage happens
+/// to be at power-on, which also means a failed or disconnected sensor buys
+/// this much travel into a stop before homing gives up. The current-limit
+/// potentiometer is what makes that a stall rather than damage.
+pub const STATOR_SEEK_MAX_MM: f32 = STATOR_TRAVEL_RANGE_MM + STATOR_DATUM_CLEARANCE_MM + 1.0;
 
 /// Default overshoot for the unidirectional approach. With no preload spring
 /// the stage is only positioned by the spindle pushing it, so this is what
@@ -149,11 +182,27 @@ pub const STATOR_SEEK_MAX_MM: f32 = 6.0;
 /// Measure the real figure at commissioning and replace this.
 pub const STATOR_BACKLASH_MM: f32 = 0.25;
 
-/// Soft travel window, as offsets from the datum. Deliberately conservative
-/// and set before the geometry was known; replace with measured figures at
-/// commissioning. Targets outside it are rejected, not clamped.
-pub const STATOR_TRAVEL_BELOW_DATUM_MM: f32 = 5.0;
-pub const STATOR_TRAVEL_ABOVE_DATUM_MM: f32 = 5.0;
+/// Soft travel window, as distances from the datum along the advance and
+/// retract directions. Because the datum is at an extreme of travel the window
+/// is one-sided by construction: all of the working range lies on one side of
+/// the datum, and the other side is the clearance to the hard stop, which is
+/// run-out for homing and not travel to operate in. Targets are therefore
+/// bounded by the datum itself in that direction, and rejected rather than
+/// clamped when they exceed it.
+///
+/// One consequence worth knowing: because a move approaches its target from
+/// one backlash allowance below it, targets within `rig_stator_backlash` of
+/// the datum-side limit cannot be reached, and are refused.
+pub const STATOR_TRAVEL_ADVANCE_MM: f32 = if STATOR_DATUM_AT_ADVANCED_EXTREME {
+    0.0
+} else {
+    STATOR_TRAVEL_RANGE_MM
+};
+pub const STATOR_TRAVEL_RETRACT_MM: f32 = if STATOR_DATUM_AT_ADVANCED_EXTREME {
+    STATOR_TRAVEL_RANGE_MM
+} else {
+    0.0
+};
 
 /// Bounds accepted for the corresponding runtime parameters. A rate above a
 /// few mm/s would need an acceleration ramp, which this axis does not

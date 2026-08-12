@@ -319,14 +319,44 @@ Design decisions worth not relitigating:
   session rather than between measurements, and read `stator_home_error` as an
   audit with a 64-microstep noise floor rather than a measurement.
 
-Two things that need deciding before the axis is used in anger:
+Two facts settled the same day, after the first draft of the firmware:
 
-1. **The displacement window.** `DISPLACEMENT_MIN_MM`/`DISPLACEMENT_MAX_MM` is a
-   fixed 10-40 mm window about the ~25 mm rest point. Moving the stator moves
-   the specimen's rest displacement, so a stator travel wide enough to push the
-   rest point outside that window trips the gate on a healthy rig. Widening the
-   window weakens the guard; making it relative to a rest point that tracks
-   stator position is a firmware change not yet made.
-2. **Whether stepping during a capture is ever wanted.** The firmware does not
-   forbid it, because the noise characterisation needs it, but the `stator`
-   source makes a violation visible after the fact.
+1. **The stage moves orthogonally to the beam and to the laser axis.** Stator
+   travel therefore does not shift the specimen's rest displacement, and
+   `DISPLACEMENT_MIN_MM`/`DISPLACEMENT_MAX_MM` need no revision on account of
+   the stage. An earlier revision of this entry recorded the opposite worry, and
+   it does not apply. The interlock that refuses to move while the gate is armed
+   stays, for the different reason that the gap is a parameter of the system:
+   moving it under a running controller changes the dynamics beneath that
+   controller, and injects the driver's switching noise into a live measurement.
+2. **The datum is at one extreme of travel**, with a hard stop just past the
+   edge. This forced a rewrite of homing before any of it ran. The datum is now
+   always latched during an advance *and* the intrusion into the clearance is
+   bounded. Which of those two is awkward depends on
+   `STATOR_DATUM_AT_ADVANCED_EXTREME`: with the datum at the retracted extreme
+   the entire final approach happens inside the clearance, so homing refuses to
+   run unless `STATOR_DATUM_CLEARANCE_MM` exceeds `STATOR_HOME_BACKOFF_MM`
+   rather than homing by driving into the stop. A blind home also always leaves
+   the clearance first, so its first motion is away from the stop whichever side
+   the stage powered up on. Both approaches now step one at a time, waiting for
+   each pulse to execute: at the FIFO's eight queued steps the sensor would be
+   read 25 µm ahead of the mechanism, which is the entire datum repeatability
+   budget. The soft travel window became one-sided to match, since the clearance
+   is run-out for homing and not travel to operate in.
+
+Still to establish before the first home:
+
+- **Which extreme, and how much clearance.** Both are guesses in
+  `src/config.rs`, currently the advanced extreme and 0.5 mm. Measure the
+  clearance first: it decides whether homing is safe at all in one of the two
+  geometries, and the firmware can only refuse on the figure it is given.
+- **Whether the opto flag rides on the stage or on the spindle.** If it rides on
+  the spindle the datum is repeatable regardless of approach direction, because
+  a screw is deterministic even when the unpreloaded stage it pushes is not, and
+  the advance-only rule would be needed for positioning but not for homing. The
+  firmware assumes the stricter case, which costs a little homing time and is
+  correct either way. The 1/1000 inch figure is consistent with both and does
+  not settle it.
+- **Whether stepping during a capture is ever wanted.** The firmware does not
+  forbid it, because the noise characterisation needs it, but the `stator`
+  source makes a violation visible after the fact.

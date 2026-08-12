@@ -72,8 +72,11 @@ pub fn issue_command(kind: u32) {
 enum Abort {
     /// A newer command arrived and supersedes the one in progress.
     Command,
-    /// The output safety gate armed. Moving the stator under a running
-    /// controller changes the specimen's rest displacement beneath it.
+    /// The output safety gate armed. The stage moves orthogonally to the beam
+    /// and the laser axis, so this is not about the displacement guard; it is
+    /// that the gap is a parameter of the system, and moving it under a running
+    /// controller changes the dynamics beneath it while injecting the driver's
+    /// switching noise into the measurement.
     Armed,
     /// A reboot was requested.
     Reboot,
@@ -151,19 +154,21 @@ impl StatorAxis {
         round_to_i32((reading_mm - self.datum_mm()) / config::STATOR_MM_PER_MICROSTEP)
     }
 
-    /// Soft travel window in advance-direction microsteps. The configured
-    /// offsets are barrel readings, so which of them is the larger step count
-    /// depends on the sign convention.
+    /// Soft travel window in advance-direction microsteps, measured from the
+    /// datum. Asymmetric by construction: the datum is at an extreme, so one
+    /// side is the working range and the other only the clearance to the hard
+    /// stop. Both configured distances are already along the advance and
+    /// retract directions, so no sign convention enters here.
     fn travel_window(&self) -> (i32, i32) {
-        let above =
-            round_to_i32(config::STATOR_TRAVEL_ABOVE_DATUM_MM / config::STATOR_MM_PER_MICROSTEP);
-        let below =
-            round_to_i32(-config::STATOR_TRAVEL_BELOW_DATUM_MM / config::STATOR_MM_PER_MICROSTEP);
-        (above.min(below), above.max(below))
+        let advance = magnitude_steps(config::STATOR_TRAVEL_ADVANCE_MM) as i32;
+        let retract = magnitude_steps(config::STATOR_TRAVEL_RETRACT_MM) as i32;
+        (-retract, advance)
     }
 
-    fn opto_retracted(&self) -> bool {
-        self.opto.is_high() == config::STATOR_OPTO_HIGH_WHEN_RETRACTED
+    /// True when the stage is past the datum edge, in the short clearance
+    /// between it and the hard stop.
+    fn beyond_datum(&self) -> bool {
+        self.opto.is_high() == config::STATOR_OPTO_HIGH_BEYOND_DATUM
     }
 
     fn abort_reason(&self) -> Option<Abort> {
@@ -268,33 +273,48 @@ impl StatorAxis {
     /// edge, or until `limit` steps have been taken. Returns whether the edge
     /// was found; not finding it within the bound is a fault rather than a
     /// reason to keep going, because the alternative is a hard stop.
-    async fn step_until_opto(
+    async fn step_until_beyond(
         &mut self,
-        want_retracted: bool,
+        want_beyond: bool,
         advance: bool,
         period_us: u32,
         limit: u32,
         settle: bool,
     ) -> Result<bool, Abort> {
         for _ in 0..limit {
-            if self.opto_retracted() == want_retracted {
+            if self.beyond_datum() == want_beyond {
                 return Ok(true);
             }
             self.one_step(advance, period_us, settle).await?;
         }
         self.drain(period_us).await;
-        Ok(self.opto_retracted() == want_retracted)
+        Ok(self.beyond_datum() == want_beyond)
     }
 
     /// Find the datum and zero the step counter there.
     ///
-    /// Fast search for the edge, retract clear of it, then a slow advance onto
-    /// it. The final motion is always a slow advance, which is both what makes
-    /// the datum repeatable and what leaves the mechanism in the standard
-    /// contact state.
+    /// The datum is always latched **during an advance**, because that is the
+    /// only motion that positions an unpreloaded stage. The datum also sits at
+    /// one extreme of travel, with a hard stop just past it, so the sequence
+    /// also has to bound how far it ever intrudes into that clearance. Which
+    /// of those two constraints is easy depends on the geometry:
+    ///
+    /// - datum at the advanced extreme: advancing points at the edge, so the
+    ///   approach runs from the working range and stops one step past the edge.
+    ///   The retreat that clears the edge beforehand happens in the open range;
+    /// - datum at the retracted extreme: advancing points away from the edge,
+    ///   so homing must first enter the clearance, retreat into it by the
+    ///   backoff, and advance back out onto the edge. Every part of that is
+    ///   inside the clearance, which is why it is refused unless the clearance
+    ///   is comfortably bigger than the backoff.
+    ///
+    /// Both approaches step one at a time, waiting for each pulse to be
+    /// executed, so the sensor is read in step with the mechanism rather than a
+    /// FIFO depth ahead of it. That matters here: at eight queued steps the
+    /// overshoot would be the same size as the datum's whole repeatability
+    /// budget.
     async fn home(&mut self) -> Result<(), Abort> {
         self.set_state(StatorState::Homing);
-        self.energise().await;
 
         let fast = Self::period_us(config::STATOR_HOME_FAST_MM_S);
         let slow = Self::period_us(config::STATOR_HOME_SLOW_MM_S);
@@ -302,30 +322,59 @@ impl StatorAxis {
         let backoff = magnitude_steps(config::STATOR_HOME_BACKOFF_MM);
         let predicted = self.homed.then_some(self.steps);
 
-        // Locate the edge from whichever side we start on.
-        let start_retracted = self.opto_retracted();
-        self.set_direction(start_retracted, fast).await;
+        // The direction that moves toward the datum, and so toward the hard
+        // stop just past it, expressed as an `advance` flag.
+        let toward_datum = config::STATOR_DATUM_AT_ADVANCED_EXTREME;
+
+        if !toward_datum && config::STATOR_HOME_BACKOFF_MM >= config::STATOR_DATUM_CLEARANCE_MM {
+            // With the datum at the retracted extreme the whole approach runs
+            // inside the clearance, so a backoff that does not fit in it would
+            // home by driving into the stop.
+            return self.lost("stator: homing backoff does not fit the datum clearance");
+        }
+
+        self.energise().await;
+        self.settled = false;
+        self.publish();
+
+        // Leave the clearance if we start in it, moving away from the hard
+        // stop, and then stand clear of the edge in the open range.
+        if self.beyond_datum() {
+            self.set_direction(!toward_datum, fast).await;
+            if !self
+                .step_until_beyond(false, !toward_datum, slow, seek, true)
+                .await?
+            {
+                return self.lost("stator: homing could not leave the datum clearance");
+            }
+        }
+        self.set_direction(!toward_datum, fast).await;
+        self.step_fixed(backoff, !toward_datum, fast).await?;
+
+        // Approach the edge from the open range.
+        self.set_direction(toward_datum, slow).await;
         if !self
-            .step_until_opto(!start_retracted, start_retracted, fast, seek, false)
+            .step_until_beyond(true, toward_datum, slow, seek, true)
             .await?
         {
             return self.lost("stator: homing search found no datum edge");
         }
 
-        // Come back onto the retracted side and clear the edge, its hysteresis,
-        // and any lash.
-        self.settled = false;
-        self.publish();
-        self.set_direction(false, fast).await;
-        if !self.step_until_opto(true, false, fast, seek, false).await? {
-            return self.lost("stator: homing lost the datum edge on the way back");
-        }
-        self.step_fixed(backoff, false, fast).await?;
-
-        // Slow advance onto the edge. This point is the datum.
-        self.set_direction(true, slow).await;
-        if !self.step_until_opto(false, true, slow, seek, true).await? {
-            return self.lost("stator: homing approach did not reach the datum edge");
+        if toward_datum {
+            // The approach was itself an advance, so the edge crossing already
+            // sits at the end of one and defines the datum.
+        } else {
+            // The approach was a retract, which does not position the stage.
+            // Retreat further into the clearance and come back out advancing,
+            // so the crossing that defines the datum is made under contact.
+            self.step_fixed(backoff, toward_datum, slow).await?;
+            self.set_direction(true, slow).await;
+            if !self
+                .step_until_beyond(false, true, slow, seek, true)
+                .await?
+            {
+                return self.lost("stator: homing approach did not reach the datum edge");
+            }
         }
         self.drain(slow).await;
 
