@@ -1,0 +1,100 @@
+# Magneto-elastic rig
+
+HELIC-DAQ firmware for the magneto-elastic rig: an electromagnetically excited
+cantilever whose tip displacement is measured by an optoNCDT laser
+triangulation sensor, with eight simultaneously sampled analogue inputs and a
+four-channel analogue output stage. It runs on a W5500-EVB-Pico2, which is what
+the default build targets; the pin-compatible W6100-EVB-Pico2 is available
+through the `board-w6100` feature.
+
+This repository holds only what is specific to this rig. The real-time loop,
+cross-core contracts, parameter registry, network and control services,
+protocol and host tooling are the [HELIC-DAQ
+platform](https://github.com/dawbarton/helic-daq), pinned by tag in
+`Cargo.toml` and upgraded deliberately rather than tracked. The platform's
+developer guide, section "Adding a rig in its own repository", is the contract
+this repository implements.
+
+## Hardware
+
+- AD7609 eight-channel simultaneous ADC on SPI1. PWM-driven CONVST supplies
+  the hardware sample clock and the BUSY falling edge starts each RT tick.
+- AD5064 four-channel DAC on the same core-1 SPI bus. Channel A drives the
+  exciter's differential current-controller input and channel C holds the
+  matching negative reference; the fitted output stages are all unipolar, so
+  a logical output of zero rests both at the 2.048 V common-mode point.
+- optoNCDT laser on UART0 TX/RX through separate TTL↔RS422 paths. The firmware
+  configures the measuring rate and distance-only RS422 output at startup. A
+  disconnected input requires the external 10 kΩ pull-up on GP1 described in
+  `notes.md`.
+- W5500 or W6100 Ethernet on the board's SPI0 interface.
+- GP14 timing output, high while the real-time tick body executes.
+
+The default sample rate is 8 kHz and output channel 0 (DAC A) is selected. The
+mandatory synchronous real-time loop runs from the BUSY edge with no Embassy
+executor on core 1, and its whole tick path executes from SRAM.
+
+## Safety
+
+This rig drives an exciter through a feedback path that can go unstable, so it
+opts into the platform's per-tick output safety gate (`SAFETY_GATED = true`).
+The gate runs after the controller, forcing and table sum, and before the DAC
+write:
+
+- the commanded channel voltage is clamped into the window set by
+  `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V` in `src/config.rs`;
+- tip displacement outside `DISPLACEMENT_MIN_MM`–`DISPLACEMENT_MAX_MM`, a
+  non-finite reading, or a laser feed that stops advancing for
+  `LASER_STALE_AFTER_S` latches a fault and quiets the actuator;
+- safety starts disarmed after flashing, and a dropped control connection
+  disarms it again.
+
+These limits are compile-time: change them in `src/config.rs` and reflash.
+They must match the fitted output stages and the physical travel available to
+the specimen. `DAC_POLARITY` in `src/rig.rs` likewise describes the fitted
+analogue board and is not a free choice.
+
+## Layout
+
+`src/board.rs` is the complete pin and ownership map; `src/config.rs` holds the
+compile-time laboratory choices, including the sample rate, safety limits,
+network configuration and the active controller and programme; `src/rig.rs`
+assembles the core-1 hardware and implements `Rig`; `src/telemetry.rs` declares
+the atomic-backed values exposed to the host; and `src/main.rs` binds
+interrupts, assigns tasks to cores, and composes the platform's runners.
+
+`ActiveController` is currently `PassThrough`, selected statically in
+`src/config.rs`. The generated target passes through the controller; forcing
+and arbitrary-table signals are then added by the common RT loop. Replace both
+`ActiveController` and `make_controller()` to use another controller.
+
+## Building and checking
+
+```sh
+cargo build --release                       # firmware, thumbv8m.main-none-eabihf
+cargo run --release                         # flash via probe-rs
+```
+
+The verification gates come from the platform's host package, pinned to the
+same tag as the crates, and are installed rather than copied:
+
+```sh
+pip install "helic-daq @ git+https://github.com/dawbarton/helic-daq@v0.1.2#subdirectory=host-python"
+
+cargo fmt --all -- --check
+cargo clippy --release --workspace -- -D warnings
+cargo build --release
+cargo build --release --no-default-features --features board-w6100
+helic-deps-check --policy dependency-policy.toml
+helic-rt-layout --profile rig-profile.toml \
+  --elf-dir target/thumbv8m.main-none-eabihf/release
+helic-rt-regression --profile rig-profile.toml   # hardware, sequential
+```
+
+`rig-profile.toml` is this rig's static and hardware verification contract:
+identity, required and optional hot symbols, sample rate, capture sources,
+the 60 µs loop-time limit and the ordered quieting sequence. Update it whenever
+the rig or its hot-path boundary changes.
+
+Software checks establish neither electrical nor real-time behaviour. Record
+hardware evidence in `notes.md`, and consult it before relying on a path.

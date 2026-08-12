@@ -1,0 +1,31 @@
+# Crate-layering rules owned by this rig, enforced by `helic-deps-check`.
+#
+# The rig's dependency surface is fixed exactly rather than bounded: everything
+# reachable from the firmware runs on a microcontroller with a 125 µs tick
+# budget and no allocator, so a new dependency is a deliberate, reviewed edit
+# and not something to discover later from a build log. Adding one here without
+# updating this list fails the gate.
+schema_version = 1
+
+[[exact]]
+package = "fw-magnetoelastic-rig"
+dependencies = [
+  "cortex-m-rt",
+  "defmt",
+  "defmt-rtt",
+  "embassy-embedded-hal",
+  "embassy-executor",
+  "embassy-net",
+  "embassy-rp",
+  "embassy-sync",
+  "embassy-time",
+  "fixed",
+  "helic-core",
+  "helic-drivers",
+  "helic-fw-optoncdt",
+  "helic-fw-rt",
+  "helic-fw-support",
+  "helic-rt",
+  "panic-probe",
+  "static_cell",
+]
