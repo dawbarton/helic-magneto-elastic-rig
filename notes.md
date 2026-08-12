@@ -211,3 +211,48 @@ a trip and was quieting the actuator, which is the designed response to a blind
 feedback path. The figures above are therefore evidence about the acquisition,
 timing and communications paths only, and the laser path is neither confirmed
 nor called into question by them.
+
+### `coil`/`drive` rename, `drive` wiring pending (2026-08-12)
+
+ADC channels 0 and 1 became named sources, and channel 1 was added as `drive`,
+a loopback from the exciter current controller's differential input. This
+restores software observability of the output path that moving channel 0 to the
+coil had removed. See the standing constraints above for what `drive` does and
+does not mean.
+
+**The wiring is not in yet**, so nothing here is evidence about the physical
+loopback: channel 1 was an open differential input throughout. What this
+records is that the firmware and profile changes are sound and the rename is
+live on the wire.
+
+Exact clean W5500 firmware `0.1.0 e962260`:
+
+- `helic-daq sources` reports 15 sources with ids 0 and 1 as `coil` and
+  `drive`, so the rename is wire-visible and discovery-clean;
+- `helic-rt-regression --profile rig-profile.toml --no-flash` passed every
+  phase at 7999.6–8000.3 ticks/s with zero overruns, tick timeouts, dropped
+  records, lost packets, capture drops or index gaps, now capturing three
+  sources (`coil`, `drive`, `out`) rather than two. `loop_time_max` stayed at
+  44 µs and the phase breakdown was unchanged, so the extra capture source
+  cost nothing measurable;
+- `cargo fmt`, release clippy, `helic-deps-check`, `helic-rt-layout` passed,
+  and the W6100 variant cross-built.
+
+A 1 s disarmed capture as a pre-wiring baseline, worth keeping to compare
+against once the loopback is connected: `coil` spanned -0.61 to +0.23 mV
+(std 0.12 mV), `drive` 0.00 to +0.61 mV (std 0.08 mV), and `out` was
+identically zero. Both ADC traces are at the converter's quantisation floor,
+which for `drive` is what an open differential input should look like and is
+therefore not evidence that anything is connected.
+
+Two things to do when the wiring goes in:
+
+1. Check the exciter input's levels before connecting. The pair should sit
+   within the AD7609's ±10 V differential range at DAC levels, but if the cape
+   has voltage gain ahead of the exciter it might not, and that is worth
+   confirming rather than assuming.
+2. Calibrate `drive` against `out` once, with a scope, and record the ratio in
+   the standing constraints above. Until that is done `drive` shows only that
+   the output moves. Doing this with the laser powered would also close the
+   outstanding symmetric-drive question in the entry above, since a correct
+   A/C pair gives `drive` twice the amplitude a stuck C would.
