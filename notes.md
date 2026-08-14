@@ -1002,3 +1002,40 @@ itself and nothing else.
 Verified on the deleted version: the platform's full test suite passes, 173
 tests, with and without `diag-max-command-burst`; `cargo clippy --workspace
 --all-targets` is clean; the rig builds, flashes, and measures 45 us.
+
+## Platform upgraded to v0.2.1, and the control link has a fifteen-second clock (2026-08-14)
+
+The command-envelope fix landed upstream and this rig is repinned from v0.1.3
+to v0.2.1. The rig's only source change was deleting the
+`diag-wide-command-payload` feature forward, since the feature no longer
+exists; nothing in `src/` needed touching.
+
+Verified on hardware after the upgrade, all six gates plus the regression:
+quiet tick 44 us, a parameter write 45 us against the profile's 60 us limit,
+366 writes in the new write phase, no overruns, no jitter, no dropped records,
+no acceptance errors. Before the upgrade that phase read 64 us and would have
+failed the gate it had never previously been tested against.
+
+**A separate and more serious defect turned up while doing this, and it is not
+fixed.** The control connection stops being answered about fifteen seconds
+after it is opened, after which new connections time out rather than being
+refused. Core 1 is untouched throughout, ticking at exactly 8 kHz with no
+overruns, and core 0's status task, laser probe, and record drain all keep
+running; only the network path dies. It reproduces on v0.1.3, so it is neither
+the envelope change nor anything this rig did, and it is measured across seven
+runs at 15.06 to 16.02 s independent of traffic direction, rate, and volume.
+The platform's `notes.md` at v0.2.1 carries the full characterisation and the
+suggested bisect.
+
+What it means for working here, until it is fixed:
+
+- Keep any single control session under about twelve seconds. Every
+  `helic-daq` command is connect, request, disconnect, so ordinary use is
+  unaffected; it is scripts holding one connection that break.
+- The default `helic-rt-regression` run exceeds the window and will report
+  `control link lost`. Use `--idle-seconds 2 --poll-seconds 2
+  --write-seconds 3 --capture-samples 4000`, which fits inside it and is what
+  the acceptance figures above were measured with.
+- The stepper work in the sections above was done in short bursts and is
+  unaffected, but a long automated move sequence would need reconnecting
+  rather than holding one session open.
