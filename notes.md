@@ -448,3 +448,49 @@ direction, so `STATOR_DIR_ADVANCE_HIGH` and `STATOR_ADVANCE_INCREASES_READING`
 stop being guesses; check the barrel returns to its starting reading, which is
 the first evidence about lost steps and coupling slip; then measure the datum
 geometry before any homing, and only then the steps-per-millimetre check.
+
+### Stator ENABLE polarity, and a second attempt (2026-08-14)
+
+The 2026-08-14 first-motion test above emitted its steps correctly but **the
+motor did not turn at all**. Bench meter readings at rest diagnosed it, and are
+worth keeping because between them they exonerate everything except the one
+constant that was wrong:
+
+| Pin | Signal | Reading at rest | Reading |
+|---|---|---|---|
+| GP28 | ENABLE | low | the driver is **enabled** by a low level |
+| GP26 | DIR | high | the last motion was the closing advance, as designed |
+| GP22 | STEP | low | correct park state between pulses |
+| GP27 | opto | low | against an internal pull-up, so the sensor is connected and actively driving |
+
+The enable is **active low**, and the firmware had assumed active high. It was
+therefore driving the pin high for the whole of every move, disabling the
+driver, and low at rest, holding the motor energised continuously. Exactly
+backwards in both states. `STATOR_ENABLE_ACTIVE_HIGH` is now `false`.
+
+Two things follow. The motor sat energised from the first flash until the fix,
+about twenty minutes, which is the state the ENABLE line exists to avoid. And
+the external resistor wanted on that line is a **pull-up** to the 3.3 V on
+connector pin 2, not the pull-down recommended earlier: the enable input has an
+internal pull-down, so a microcontroller in reset or unpowered otherwise floats
+the driver enabled.
+
+**The step pulses were real, and this is worth recording because it is not
+obvious.** The firmware's step counter only proves what the PIO was asked to
+emit. But `emit` waits on FIFO space, so had the state machine not been
+executing, the FIFO would have filled and the move would have stalled and taken
+far longer than commanded. Instead both moves ran at 157 steps/s, matching the
+configured 0.5 mm/s to the sample. The state machine was therefore consuming
+words at exactly the programmed rate, which it can only do by executing the
+delay loop, so STEP was toggling on GP22 throughout. The fault was downstream of
+the pin.
+
+Exact clean W5500 firmware `0.1.0 a37f46d`, the same two jogs repeated:
+`stator_steps` 0 to exactly 200 and back to exactly 0, `stator_moves` 2,
+`stator_faults` 0, a mid-move poll at step 17 retracting toward -79, zero
+overruns and zero tick timeouts. Identical to the previous attempt, as expected:
+the firmware could not tell the difference, which is the point.
+
+**Still unconfirmed by observation**: whether the motor turned this time, in
+which direction, and whether the barrel returned to its starting reading. The
+firmware evidence cannot settle any of the three.
