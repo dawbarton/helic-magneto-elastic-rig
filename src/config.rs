@@ -181,8 +181,11 @@ pub const STATOR_HOME_FAST_MM_S: f32 = 0.5;
 pub const STATOR_HOME_SLOW_MM_S: f32 = 0.1;
 
 /// Distance retracted past the datum edge before the final slow advance onto
-/// it. Must exceed the sensor's hysteresis and the mechanism's lash.
-pub const STATOR_HOME_BACKOFF_MM: f32 = 0.2;
+/// it. Must exceed the sensor's hysteresis and the mechanism's lash, which
+/// together were measured at 0.697 mm on 2026-08-14. The old 0.2 mm was inside
+/// that dead band, so the backoff would not have moved the flag at all and the
+/// approach would have re-crossed nothing.
+pub const STATOR_HOME_BACKOFF_MM: f32 = 1.5;
 
 /// Bound on any homing search. Exceeding it faults rather than continuing,
 /// because the alternative is driving into a hard stop. It has to exceed the
@@ -195,8 +198,15 @@ pub const STATOR_SEEK_MAX_MM: f32 = STATOR_TRAVEL_RANGE_MM + STATOR_DATUM_CLEARA
 /// Default overshoot for the unidirectional approach. With no preload spring
 /// the stage is only positioned by the spindle pushing it, so this is what
 /// makes a retracting move deterministic at all rather than a refinement.
-/// Measure the real figure at commissioning and replace this.
-pub const STATOR_BACKLASH_MM: f32 = 0.25;
+///
+/// Measured on 2026-08-14 by crossing the opto edge in both directions: the
+/// edge appears at 2794.5 microsteps advancing and 2575 retracting, a reversal
+/// dead band of 219.5 microsteps, 0.697 mm. The 0.25 mm guessed here before was
+/// less than half of it, which would have left every retracting move short of
+/// contact and its reported position wrong by up to the shortfall. 1.0 mm gives
+/// about 40 per cent margin. The figure lumps mechanical lash with any sensor
+/// hysteresis, which is the conservative way round for this purpose.
+pub const STATOR_BACKLASH_MM: f32 = 1.0;
 
 /// Soft travel window, as distances from the datum along the advance and
 /// retract directions. Because the datum is at an extreme of travel the window

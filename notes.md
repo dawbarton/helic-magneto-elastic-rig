@@ -644,3 +644,58 @@ it never returns to 1, the stage is not following retraction at all.
 
 Until that is answered, no position derived from a retract should be trusted,
 and the `move_to` backlash compensation is unproven.
+
+## Reversal dead band measured at 0.697 mm, and the datum edge is sharp (2026-08-14)
+
+The retract test answered both questions, and the answer to the second was not
+the one the failed refinement suggested.
+
+**The stage does follow a retract.** Retracting 500 microsteps from 2771 brought
+the opto back to 1, latched at **2575 microsteps**. So the spindle is not simply
+walking away from a stationary stage, and the retract-then-advance scheme is
+mechanically sound in principle.
+
+**The dead band is large.** Advancing back released the opto again at **2795**,
+against 2794 on the first crossing.
+
+| Crossing | Latched microsteps |
+|---|---|
+| Advancing, first pass | 2794 |
+| Retracting | 2575 |
+| Advancing, second pass | 2795 |
+
+The reversal dead band is 2794.5 - 2575 = **219.5 microsteps, 0.697 mm**, about
+1.1 barrel revolutions. This is why the earlier refinement failed: backing off 30
+microsteps was entirely inside it, so the flag never moved and the opto never
+returned. The observation was right and the hysteresis reading of it was wrong.
+
+The figure lumps mechanical lash with any sensor hysteresis. Separating them
+needs an independent displacement measure against the barrel, and for setting
+the overshoot the lumped figure is the conservative one to use anyway.
+
+**The datum edge itself is excellent.** Two advancing crossings, one microstep
+apart, 3.175 um. That is eight times better than the 25.4 um the design budgeted
+from the earlier manual testing, and it is the quantity the datum's repeatability
+actually rests on. Worth confirming over more than two crossings before relying
+on it, but the sign is good.
+
+### Consequences, both now in config.rs
+
+- `STATOR_BACKLASH_MM` 0.25 to **1.0**. The old value was less than half the dead
+  band, so every retracting move would have stopped short of contact and reported
+  a position wrong by up to the shortfall. Also set at runtime immediately, since
+  `rig_stator_backlash` does not need a reflash.
+- `STATOR_HOME_BACKOFF_MM` 0.2 to **1.5**. The old value sat inside the dead band,
+  so homing's back-off-and-reapproach would not have moved the flag and the final
+  approach would have re-crossed nothing. Homing as previously written could not
+  have worked, independently of the datum geometry being unknown.
+
+That second change interacts with `STATOR_DATUM_CLEARANCE_MM`, still a guessed
+0.5 mm. If the datum turns out to be at the retracted extreme, `home` refuses to
+run when the backoff does not fit inside the clearance, which it now does not.
+That refusal is correct rather than a regression: it says the clearance must be
+measured before homing can be trusted, which was already true.
+
+Still open: whether the opto flag rides on the stage or on the spindle. It
+matters more now. If the flag is on the spindle, 0.697 mm is the lash upstream
+of it only, and the spindle-to-stage contact adds more on top.
