@@ -531,3 +531,34 @@ compile-time defaults remain 0 and 0.5.
 **Still unconfirmed**: which physical direction the advance corresponds to, and
 whether the barrel returns to its starting reading. Both need an eye on the
 mechanism, not the telemetry.
+
+## Enable-to-first-step delay raised to 100 ms (2026-08-14)
+
+`STATOR_WAKE_MS` was 5 ms, which is generous against the MP6500's own wake but
+misses the constraint that actually matters. The driver's electrical restore is
+fast: the indexer keeps its phase while the outputs are disabled, and coil
+current comes back in well under a millisecond. The rotor is the slow part.
+De-energised, it is held only by detent and friction, so it can sit off the
+phase the indexer still holds; re-energising snaps it back, and that snap is a
+lightly damped ring against the rotor's inertia lasting tens of milliseconds.
+A 5 ms wait starts stepping inside the ring, which is exactly the condition for
+losing steps at the start of a move.
+
+Now 100 ms. It is paid at most once per move, and only on a transition from
+de-energised, against moves that already take seconds.
+
+Two things this does not fix, both worth watching:
+
+- The snap-back is uncounted. The step counter assumes the rotor does not move
+  while the driver is off. Returning to the same phase keeps the count true, and
+  it should, but a detent strong enough to pull the rotor a full step over would
+  leave the count silently wrong by one full step, 3.175 um. That is well under
+  the datum's 25.4 um repeatability, so it would only ever show up cumulatively,
+  in `stator_home_error` over many de-energise cycles.
+- Nothing ramps. The first step is issued at the full traverse rate from
+  standstill. At 0.5 mm/s that is 157 steps/s, comfortably inside the pull-in
+  rate of a small stepper, so it is sound on its own; it is only the combination
+  with a still-ringing rotor that ate the margin.
+
+Not yet flashed: the rig is still running `7017c41` with the demonstration
+settings, and a reflash would clear them.

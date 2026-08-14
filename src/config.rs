@@ -156,9 +156,15 @@ pub const STATOR_DATUM_CLEARANCE_MM: f32 = 0.5;
 /// Conservative and set before the geometry was known.
 pub const STATOR_TRAVEL_RANGE_MM: f32 = 5.0;
 
-/// Time for the MP6500 to wake from sleep before the first step. Generous
-/// against the part's specification; this path is never time-critical.
-pub const STATOR_WAKE_MS: u64 = 5;
+/// Delay between energising the driver and the first step. The driver's own
+/// wake is the smaller part of this: coil current is restored in well under a
+/// millisecond, and the indexer keeps its phase while the outputs are off. The
+/// limit is mechanical. While de-energised the rotor is held only by detent and
+/// friction, so re-energising snaps it back to the held phase, and that snap
+/// rings for tens of milliseconds against the rotor's inertia. Stepping into a
+/// ringing rotor is how a move loses steps at its start. Paid at most once per
+/// move, against a move that already takes seconds, so it is bought cheaply.
+pub const STATOR_WAKE_MS: u64 = 100;
 
 /// How long to hold current after a move before de-energising, when
 /// `rig_stator_hold` is zero. Long enough for the mechanism to stop ringing.
