@@ -938,3 +938,67 @@ operation for any experiment that writes parameters while running, which is
 every continuation or live-tuning experiment. It would also bite if
 `COMMANDS_PER_TICK` were raised, since two commands cost 85 us today, or on a
 rig with a heavier measure or actuate path than this one's 29 us.
+
+## What `Values` was for, and why deletion beats gating (2026-08-14)
+
+### What it was for
+
+The platform's own history answers this, and it is a single afternoon.
+
+| Time, 2026-08-11 | Commit | What happened |
+|---|---|---|
+| 13:09 | `117f3fd` | `Payload::Values` introduced at 132 values wide, replacing operation-specific commands with domain/id routing. It was the general mechanism for every vector real-time parameter. |
+| 13:17 | `af90fea` | Hardware measured two 132-value commands at 74 us against CBC's 60 us gate. Narrowed to 33; force vectors moved to the owner-checked double buffer. `Values` still carried the target and forcing coefficients. |
+| 13:21, 13:24 | `2d2b0ed`, `19e659c` | The maximum-command-burst diagnostic wired up to exercise `Values`. |
+| 13:30 | `a3bf233` | The same measurement at the narrowed width, two 33-value commands at 73 us, moved the coefficients to buffers too. **`Values` lost its last production consumer here**, twenty-one minutes after being narrowed for it. |
+
+So `Values` is the vestige of the original copied-payload design, kept at the
+width of its final user after that user was moved off it precisely because
+copying was too slow. It was never deleted, and the cost was never
+reattributed. The platform concluded that the copy was too slow for wide
+payloads and moved wide payloads away, without noticing that an enum charges
+its largest variant to every command. Since 13:30 that afternoon the only
+thing keeping it alive has been the diagnostic built to measure it.
+
+### Gate or delete
+
+Measured both. They are numerically identical: 45 us write, 2 us over quiet,
+134584 bytes of `.bss`. So the choice is hygiene, not performance, and hygiene
+says delete.
+
+The decisive argument is what gating does to the diagnostic. Gate the variant
+and `size_of::<RtCommand>()` becomes feature-dependent, so
+`diag-max-command-burst` measures a command shape that no shipped firmware
+has: a probe that only measures itself. Delete it, point the burst probe at
+`Payload::F32`, and it measures the real production envelope for the first
+time. That is a better diagnostic than the one being given up.
+
+Three supporting reasons. A gated variant is dead in every build anyone ships,
+so it rots unexercised. The two diagnostic axes would multiply. And deletion
+buys a const assert tight enough to be worth having:
+
+```rust
+const _: () = assert!(core::mem::size_of::<RtCommand>() <= 4 * core::mem::size_of::<usize>());
+```
+
+Sixteen bytes on the target and thirty-two on a host test runner, expressed in
+pointer widths because `CommitToken` carries its owner address. That turns the
+whole class of regression from a timing failure found on hardware into a
+compile error. The bound it replaces, 160 bytes, permits exactly the mistake
+that produced this in the first place.
+
+Costs of deleting, stated fairly. `diag-wide-command-payload` disappears, and
+every rig forwards that feature in its own `Cargo.toml`, so each consumer
+needs a one-line edit; this repository needed exactly that. `MAX_RT_VALUES`
+leaves the public API. And the copied path goes entirely, so a future
+requirement for one means reintroducing it rather than flipping a feature.
+
+The `Busy` objection to relying only on buffers is weaker than it looks.
+Buffers are per parameter, not per command stream: `target_coeffs`,
+`forcing_coeffs`, and the table each own a separate `DoubleBuffer`, so the
+one-outstanding-commit restriction serialises a single parameter against
+itself and nothing else.
+
+Verified on the deleted version: the platform's full test suite passes, 173
+tests, with and without `diag-max-command-burst`; `cargo clippy --workspace
+--all-targets` is clean; the rig builds, flashes, and measures 45 us.
