@@ -238,6 +238,13 @@ write error.
 | `rig_stator_backlash` | mm | overshoot used by the unidirectional approach |
 | `rig_stator_datum` | mm | the micrometer reading at the opto datum |
 | `rig_stator_hold` | — | 1 holds current between moves, 0 de-energises |
+| `rig_stator_dwell` | s | diagnostic hold at each direction reversal, 0 in normal use |
+
+`rig_stator_dwell` exists because a retracting move reverses in the middle, and
+at working rates that reversal is over too quickly to see which phase is which
+by eye. Setting it, and dropping `rig_stator_rate`, makes the mechanism
+watchable. It is polled rather than slept through, so `rig_stator_stop` still
+works during one, and a move that never reverses never pauses.
 
 Read-only telemetry:
 

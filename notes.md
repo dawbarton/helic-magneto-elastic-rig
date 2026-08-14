@@ -494,3 +494,40 @@ the firmware could not tell the difference, which is the point.
 **Still unconfirmed by observation**: whether the motor turned this time, in
 which direction, and whether the barrel returned to its starting reading. The
 firmware evidence cannot settle any of the three.
+
+### Stator motion confirmed, and a watchable repeat (2026-08-14)
+
+With `STATOR_ENABLE_ACTIVE_HIGH` corrected to `false`, **the motor turns**.
+GP28 reads high at rest, confirming the driver is now released between moves
+rather than held energised. The first confirmed motion was too quick to observe
+by eye, so `rig_stator_dwell` was added: a diagnostic hold at each direction
+reversal, zero in normal use.
+
+Exact clean W5500 firmware `0.1.0 7017c41`, with `rig_stator_dwell` 5 s and
+`rig_stator_rate` 0.15 mm/s, repeating the same two jogs. Polled `stator_steps`
+tracks the whole sequence:
+
+| Phase | Steps | Observed |
+|---|---|---|
+| dwell | held at 0 | no motion for the first 5 s |
+| advance | 0 to 200 | 200 steps in 4.2 s |
+| dwell | held at 200 | 5 s |
+| retract | 200 to -79 | 279 steps in 5.9 s |
+| dwell | held at -79 | 5 s, seen at two consecutive polls |
+| advance | -79 to 0 | 79 steps in 1.7 s |
+
+Both moves ran at 47.5 steps/s against the 47.24 steps/s that 0.15 mm/s implies,
+so the rate parameter is honoured at this setting as well as at 0.5 mm/s. The
+retract-then-advance approach is now directly observable: the axis really does
+overshoot its target by the backlash allowance and come back onto it advancing.
+
+The excursion envelope was unchanged, -0.395 to +1.000 revolutions, and
+`stator_steps` returned to exactly 0 with `stator_faults` 0.
+
+The rig was left with `rig_stator_dwell` 5 and `rig_stator_rate` 0.15 so the
+demonstration can be repeated immediately. Neither survives a reflash, and the
+compile-time defaults remain 0 and 0.5.
+
+**Still unconfirmed**: which physical direction the advance corresponds to, and
+whether the barrel returns to its starting reading. Both need an eye on the
+mechanism, not the telemetry.
