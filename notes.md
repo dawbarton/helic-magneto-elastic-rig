@@ -839,3 +839,102 @@ element small, either by moving the inline `Values` array behind the
 sizing the payload to the harmonics a given experiment actually uses. Nothing
 in this repository can address it, and at 64 us against 125 us there is no
 operational reason to.
+
+## What an upstream fix would cost: the command envelope (2026-08-14)
+
+Follow-up to the section above, prototyped and measured rather than argued.
+Not a limit for this experiment, but it will be for a faster one, so the
+options are worth having on record.
+
+Each candidate was built against a local copy of the platform at v0.1.3,
+flashed, and measured with the same harness. The rig's own `Cargo.toml` is
+unchanged and still pins the tag; the prototypes lived in a scratch copy.
+
+### The finding that reframes it
+
+`Payload::Values`, the 132-byte inline array that sets the size of every
+command, **has no production consumer**. Its only constructor,
+`ParamStore::enqueue_max_command_burst`, and its only match arm in
+`StandardProgram::apply` are both behind `#[cfg(feature =
+"diag-max-command-burst")]`. Every vector parameter that a host can actually
+write, `target_coeffs`, `forcing_coeffs`, and `table`, travels as
+`Payload::Buffer(CommitToken)`; rig and controller parameters are scalar `f32`
+and nothing else. So in a production build that array is dead weight, and it
+is charged to every scalar write.
+
+Worse, and this is the part worth remembering: **the buffered path did not
+escape the copy cost, it only avoided making it worse.** A 33-float
+`target_coeffs` write moves a pointer-sized token and still costs the same
+64 us as writing one float, because an enum is as large as its largest
+variant whether or not that variant is in use.
+
+### Measured cost against envelope size
+
+| Variant | `RtCommand` | Write | Extra over quiet |
+|---|---|---|---|
+| `Values` gated out | 16 B | 45 us | 2 us |
+| `MAX_RT_VALUES = 8` | 44 B | 50 us | 6 us |
+| Shipped, `MAX_RT_VALUES = 33` | 140 B | 64 us | 20 us |
+| `diag-wide-command-payload`, 132 | 536 B | 118 us | 74 us |
+
+Linear through the origin at **0.139 us per byte of `RtCommand`**, about 21
+cycles per byte at 150 MHz. Four points, no curvature. That is the design law:
+the tick cost of a command is set by the size of the queue element and by
+nothing else about the command.
+
+### The options
+
+**A. Gate or delete `Values`.** One line. 20 us to 2 us, and 3968 bytes of
+`.bss` returned, exactly `COMMAND_QUEUE_LEN * (140 - 16)`, for 80 bytes of
+flash. All 173 platform tests pass with the variant gated, both with and
+without `diag-max-command-burst`. The platform's own rule, that a type earns
+its place by having two actual consumers, already argues for it: this one has
+none. Against: it is breaking under their versioning rules, which make a
+capacity change breaking in either direction, and it removes an extension
+point a future experiment might want.
+
+**B. Make the payload width a const generic per experiment.** The developer
+guide already recommends exactly this shape, "prefer a const generic with a
+default over a shared constant, so each rig pays only for what it uses".
+Measured proxy at `MAX_RT_VALUES = 8`: 6 us, so it works. Against: the
+parameter infects `RtCommand`, `Payload`, both queue endpoints, `RtChannels`,
+`ParamStore`, `Program::apply`, and `Rig`, which is a wide refactor touching
+every rig; and a default still has to be chosen, so it fixes nothing for a rig
+that takes it.
+
+**C. Route array parameters through `ValueBuffer`, then delete `Values`.** The
+mechanism exists and is proven, since the coefficient parameters already use
+it, and the numbers collapse to A's. Against: each array parameter needs its
+own statically allocated double buffer, so SRAM is paid per parameter rather
+than per queue slot, and the semantics differ. A buffered commit allows one
+outstanding activation and returns `Busy` if written again before the tick
+consumes it, whereas copied commands pipeline 32 deep. That difference is the
+only real argument for keeping a copied path at all.
+
+**D. Cut the number of copies rather than the size.** Dequeue in place,
+dispatch by reference. The measured 0.139 us/byte is spread across roughly
+three copies of the struct, so even a perfect single-copy dispatch leaves
+about 7 us at 140 bytes, an order worse than A. It also breaks the `Program`
+trait signature, and `Payload::Buffer` holds a linear token that must move, so
+in-place dispatch needs `unsafe` or an `Option::take` dance. Dominated.
+
+**E. Alignment or padding. Tested and rejected.** `#[repr(align(8))]` on both
+`Payload` and `RtCommand` changed nothing: 64 us before, 64 to 65 us after.
+The copies were never on a misaligned byte-wise path. Recording it because it
+is the obvious cheap non-breaking guess, and it does not work.
+
+Preference is A, with C as the answer for anyone who later needs a copied
+array, and B only if an experiment turns up that needs one and genuinely
+cannot use a buffer.
+
+### When this stops being free
+
+At 8 kHz there is 81 us of headroom over a 44 us quiet tick and a command
+spends 20 of it, so nothing here matters yet. It matters when the period
+shrinks. At 16 kHz the period is 62.5 us against the same 44 us quiet tick,
+leaving 18.5 us of margin for a command that needs 20: **a single parameter
+write would overrun outright.** So the present envelope forecloses 16 kHz
+operation for any experiment that writes parameters while running, which is
+every continuation or live-tuning experiment. It would also bite if
+`COMMANDS_PER_TICK` were raised, since two commands cost 85 us today, or on a
+rig with a heavier measure or actuate path than this one's 29 us.
