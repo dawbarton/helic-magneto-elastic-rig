@@ -36,9 +36,9 @@ use crate::board::StatorParts;
 use crate::config;
 use crate::step_pio::StepPulser;
 use crate::telemetry::{
-    StatorState, STATOR_BACKLASH_MM, STATOR_COMMAND, STATOR_DATUM_MM, STATOR_FAULTS, STATOR_HOLD,
-    STATOR_HOMED, STATOR_HOME_ERROR, STATOR_JOG_MM, STATOR_MOVES, STATOR_POSITION_MM,
-    STATOR_RATE_MM_S, STATOR_STATE, STATOR_STEPS, STATOR_TARGET_MM,
+    StatorState, STATOR_BACKLASH_MM, STATOR_COMMAND, STATOR_DATUM_MM, STATOR_DWELL_S,
+    STATOR_FAULTS, STATOR_HOLD, STATOR_HOMED, STATOR_HOME_ERROR, STATOR_JOG_MM, STATOR_MOVES,
+    STATOR_POSITION_MM, STATOR_RATE_MM_S, STATOR_STATE, STATOR_STEPS, STATOR_TARGET_MM,
 };
 
 /// Command kinds packed into the low byte of [`STATOR_COMMAND`].
@@ -99,6 +99,9 @@ pub struct StatorAxis {
     settled: bool,
     energised: bool,
     seen_command: u32,
+    /// Mirrors the DIR pin so a same-direction move skips the drain and any
+    /// diagnostic dwell. Starts retracted, matching the level board.rs sets.
+    dir_advance: bool,
 }
 
 /// Read a commanded `f32`, falling back to its compile-time default if the
@@ -235,14 +238,38 @@ impl StatorAxis {
         Timer::after_micros(2 * period_us as u64).await;
     }
 
-    /// Point DIR at the requested direction. The driver latches DIR on each
-    /// STEP edge, so the queue is drained first and given a settling gap;
-    /// milliseconds here are free and the MP6500 needs nanoseconds.
-    async fn set_direction(&mut self, advance: bool, period_us: u32) {
+    /// Point DIR at the requested direction, doing nothing when it is already
+    /// there. The driver latches DIR on each STEP edge, so a real change drains
+    /// the queue first and takes a settling gap; milliseconds here are free and
+    /// the MP6500 needs nanoseconds.
+    ///
+    /// `rig_stator_dwell` holds still at a reversal so the mechanism can be
+    /// watched. It is polled rather than slept through, so a stop or a
+    /// superseding command still takes effect during one.
+    async fn set_direction(&mut self, advance: bool, period_us: u32) -> Result<(), Abort> {
+        if advance == self.dir_advance {
+            return Ok(());
+        }
         self.drain(period_us).await;
+
+        let dwell_s = f32::from_bits(STATOR_DWELL_S.load(Ordering::Relaxed));
+        if dwell_s.is_finite() && dwell_s > 0.0 {
+            let mut remaining_ms = (dwell_s * 1000.0) as u64;
+            while remaining_ms > 0 {
+                if let Some(abort) = self.abort_reason() {
+                    return Err(abort);
+                }
+                let slice = remaining_ms.min(100);
+                Timer::after_millis(slice).await;
+                remaining_ms -= slice;
+            }
+        }
+
         self.dir
             .set_level(level(advance == config::STATOR_DIR_ADVANCE_HIGH));
+        self.dir_advance = advance;
         Timer::after_millis(1).await;
+        Ok(())
     }
 
     /// Queue one step. With `settle`, wait for it to be executed before
@@ -340,7 +367,7 @@ impl StatorAxis {
         // Leave the clearance if we start in it, moving away from the hard
         // stop, and then stand clear of the edge in the open range.
         if self.beyond_datum() {
-            self.set_direction(!toward_datum, fast).await;
+            self.set_direction(!toward_datum, fast).await?;
             if !self
                 .step_until_beyond(false, !toward_datum, slow, seek, true)
                 .await?
@@ -348,11 +375,11 @@ impl StatorAxis {
                 return self.lost("stator: homing could not leave the datum clearance");
             }
         }
-        self.set_direction(!toward_datum, fast).await;
+        self.set_direction(!toward_datum, fast).await?;
         self.step_fixed(backoff, !toward_datum, fast).await?;
 
         // Approach the edge from the open range.
-        self.set_direction(toward_datum, slow).await;
+        self.set_direction(toward_datum, slow).await?;
         if !self
             .step_until_beyond(true, toward_datum, slow, seek, true)
             .await?
@@ -368,7 +395,7 @@ impl StatorAxis {
             // Retreat further into the clearance and come back out advancing,
             // so the crossing that defines the datum is made under contact.
             self.step_fixed(backoff, toward_datum, slow).await?;
-            self.set_direction(true, slow).await;
+            self.set_direction(true, slow).await?;
             if !self
                 .step_until_beyond(false, true, slow, seek, true)
                 .await?
@@ -427,14 +454,14 @@ impl StatorAxis {
                     self.settled = false;
                     self.publish();
                 }
-                self.set_direction(advance, rate).await;
+                self.set_direction(advance, rate).await?;
                 self.step_fixed(self.steps.abs_diff(approach_from), advance, rate)
                     .await?;
             }
-            self.set_direction(true, rate).await;
+            self.set_direction(true, rate).await?;
             self.step_fixed(backlash as u32, true, rate).await?;
         } else if target > self.steps {
-            self.set_direction(true, rate).await;
+            self.set_direction(true, rate).await?;
             self.step_fixed(self.steps.abs_diff(target), true, rate)
                 .await?;
         }
@@ -576,6 +603,7 @@ pub async fn stator_task(parts: StatorParts, shared: &'static RtShared) -> ! {
         settled: false,
         energised: false,
         seen_command: STATOR_COMMAND.load(Ordering::Relaxed),
+        dir_advance: false,
     };
     info!("stator: axis ready, not homed");
     axis.run().await

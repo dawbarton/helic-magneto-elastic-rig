@@ -49,6 +49,7 @@ pub static STATOR_RATE_MM_S: AtomicU32 = AtomicU32::new(0);
 pub static STATOR_BACKLASH_MM: AtomicU32 = AtomicU32::new(0);
 pub static STATOR_DATUM_MM: AtomicU32 = AtomicU32::new(0);
 pub static STATOR_HOLD: AtomicU32 = AtomicU32::new(0);
+pub static STATOR_DWELL_S: AtomicU32 = AtomicU32::new(0);
 
 /// Packed `(sequence << 8) | kind`. A parameter write changes the whole word,
 /// so the task can tell a repeated command from a stale one and act on each

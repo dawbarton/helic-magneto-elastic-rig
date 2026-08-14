@@ -221,6 +221,16 @@ pub const STATOR_TRAVEL_RETRACT_MM: f32 = if STATOR_DATUM_AT_ADVANCED_EXTREME {
 pub const MAX_STATOR_RATE_MM_S: f32 = 3.0;
 pub const MAX_STATOR_BACKLASH_MM: f32 = 2.0;
 
+/// Diagnostic dwell held at each reversal of direction, in seconds.
+///
+/// Zero in normal use. Set it from the host to watch the mechanism: a move that
+/// retracts past its target and advances back onto it reverses in the middle,
+/// and at working rates that reversal is over too quickly to see which phase is
+/// which. The dwell separates them. It is interruptible, so a stop still takes
+/// effect promptly during one.
+pub const STATOR_DWELL_S: f32 = 0.0;
+pub const MAX_STATOR_DWELL_S: f32 = 30.0;
+
 /// Barrel reading at the opto datum, in mm. Zero until measured by hand at
 /// commissioning; `rig_stator_datum` overrides it at runtime, and like
 /// `LASER_RANGE_MM` that override is not persisted across a reflash.
