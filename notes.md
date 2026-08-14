@@ -1039,3 +1039,44 @@ What it means for working here, until it is fixed:
 - The stepper work in the sections above was done in short bursts and is
   unaffected, but a long automated move sequence would need reconnecting
   rather than holding one session open.
+
+## Correction: the fifteen-second failure was blocking RTT, not the control link (2026-08-14)
+
+The section above is wrong in its diagnosis and is retracted. There is no
+control-link defect and the platform's keep-alive constants are not
+implicated. **`defmt-rtt` blocks when its buffer fills, and it fills whenever
+no debugger is draining it.** The status task logs once a second, so it fills
+in roughly fifteen seconds, and the next `info!` blocks inside a critical
+section and stops core 0: network, record drain, laser probe, all of it. Core
+1 is Embassy-free and never logs, which is why it went on ticking at exactly
+8 kHz with no overruns while the board was invisible.
+
+Two things hid it. My harness killed the tmux flashing session to free the
+probe before each measurement, so every failing run had no RTT reader and
+every passing run had one; the fifteen seconds is a buffer fill time at a
+fixed logging rate, which is why it looked like a clock and did not depend on
+traffic. And attaching a probe drains the buffer and releases the block, so
+the fault removes itself the moment you look at it. My own probe capture
+showed a healthy core 0 for that reason, not because core 0 was ever fine.
+
+Settled on one firmware with no reset in between:
+
+| Condition | 20 ms reads |
+|---|---|
+| Probe attached | survives, ended at 90 s |
+| Probe killed | dies after 455 reads, 12.83 s |
+| Probe re-attached, no reset | answers immediately, `ticks` 12462784 |
+
+Fixed at v0.2.2 by adding `features = ["disable-blocking-mode"]` to this rig's
+own `defmt-rtt` declaration, so a full buffer drops frames rather than halting
+the core. Every rig must make that edit itself; nothing catches its absence.
+
+**The operating advice in the section above is withdrawn.** Sessions no longer
+need to be kept under twelve seconds, and the default `helic-rt-regression`
+now runs to completion: 630 writes in the write phase at 45 us against the
+60 us limit, 8000 records, no lost packets, no index gaps, no acceptance
+errors, with no probe attached. Long automated stepper sequences over a single
+held connection are fine again.
+
+This is almost certainly what the two earlier unexplained unreachable episodes
+were, and what the stale connection at the start of this session was.
