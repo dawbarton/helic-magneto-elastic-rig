@@ -181,11 +181,15 @@ pub const STATOR_HOME_FAST_MM_S: f32 = 0.5;
 pub const STATOR_HOME_SLOW_MM_S: f32 = 0.1;
 
 /// Distance retracted past the datum edge before the final slow advance onto
-/// it. Must exceed the sensor's hysteresis and the mechanism's lash, which
-/// together were measured at 0.697 mm on 2026-08-14. The old 0.2 mm was inside
-/// that dead band, so the backoff would not have moved the flag at all and the
-/// approach would have re-crossed nothing.
-pub const STATOR_HOME_BACKOFF_MM: f32 = 1.5;
+/// it.
+///
+/// Back at 0.2 mm, but not because 0.2 mm is sufficient: measurement on
+/// 2026-08-14 showed no backoff in this range moves the stage at all. See
+/// [`STATOR_BACKLASH_MM`]. A larger value buys nothing, so the small one is
+/// kept until the stage is preloaded, at which point this must be re-measured.
+/// **Homing must not be run until then**; it would latch a datum from a stage
+/// that never moved.
+pub const STATOR_HOME_BACKOFF_MM: f32 = 0.2;
 
 /// Bound on any homing search. Exceeding it faults rather than continuing,
 /// because the alternative is driving into a hard stop. It has to exceed the
@@ -199,14 +203,20 @@ pub const STATOR_SEEK_MAX_MM: f32 = STATOR_TRAVEL_RANGE_MM + STATOR_DATUM_CLEARA
 /// the stage is only positioned by the spindle pushing it, so this is what
 /// makes a retracting move deterministic at all rather than a refinement.
 ///
-/// Measured on 2026-08-14 by crossing the opto edge in both directions: the
-/// edge appears at 2794.5 microsteps advancing and 2575 retracting, a reversal
-/// dead band of 219.5 microsteps, 0.697 mm. The 0.25 mm guessed here before was
-/// less than half of it, which would have left every retracting move short of
-/// contact and its reported position wrong by up to the shortfall. 1.0 mm gives
-/// about 40 per cent margin. The figure lumps mechanical lash with any sensor
-/// hysteresis, which is the conservative way round for this purpose.
-pub const STATOR_BACKLASH_MM: f32 = 1.0;
+/// Measurement on 2026-08-14 found there is no useful value. Retracting from a
+/// settled advanced position by 0.2, 0.4, 0.8 and 1.6 mm never moved the stage
+/// past a datum edge only 0.17 mm below it; only a 2.53 mm retraction did, and
+/// even then the stage had crept just 0.17 mm while the spindle withdrew 2.53.
+/// Without a preload nothing pulls the stage after the spindle, so a retraction
+/// simply opens a gap and leaves the stage where it was.
+///
+/// So the compensation is inert at any plausible setting rather than merely
+/// undersized, and a larger value costs travel to buy nothing. Kept small.
+/// **A retracting move does not currently reposition the stage**, and the
+/// position it reports afterwards is not to be believed. Advancing moves are
+/// unaffected and repeat to about one microstep. The fix is mechanical: preload
+/// the stage against the spindle, then measure this properly.
+pub const STATOR_BACKLASH_MM: f32 = 0.25;
 
 /// Soft travel window, as distances from the datum along the advance and
 /// retract directions. Because the datum is at an extreme of travel the window

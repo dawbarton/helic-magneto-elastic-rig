@@ -699,3 +699,60 @@ measured before homing can be trusted, which was already true.
 Still open: whether the opto flag rides on the stage or on the spindle. It
 matters more now. If the flag is on the spindle, 0.697 mm is the lash upstream
 of it only, and the spindle-to-stage contact adds more on top.
+
+## The retract does not move the stage: backlash compensation is inert (2026-08-14)
+
+The 0.697 mm dead band recorded above is wrong, and so was the reasoning that
+raised the constants. Retracting it.
+
+Two problems with that measurement. First, the wait-for-idle loop in the test
+harness compared `stator_state` against 1 and broke out on anything else, but
+the idle state here is 3, not homed, so it returned immediately and the next
+command was issued into a still-running move, aborting it. The single-step
+refinement was therefore issuing aborts, not steps. Second, and because of that,
+the 579-step retract that produced the 2575 crossing started from a position
+left by those aborted moves, so its initial state was unknown.
+
+Repeated cleanly, from a position reached by a long monotonic advance, with the
+completed-move counter as the wait signal:
+
+| Retraction from 2850 | Opto returned to 1? |
+|---|---|
+| 62 microsteps, 0.2 mm | no |
+| 125 microsteps, 0.4 mm | no |
+| 251 microsteps, 0.8 mm | no |
+| 503 microsteps, 1.6 mm | no |
+| 797 microsteps, 2.53 mm | yes, crossing at 2053 |
+
+The datum edge sat 54 microsteps, 0.17 mm, below the start. So while the spindle
+withdrew 2.53 mm the stage crept back 0.17 mm, and four retractions of up to
+1.6 mm moved it past nothing at all.
+
+**The stage does not follow the spindle on a retraction.** With no preload
+nothing pulls it, so retracting opens a gap and leaves the stage where it was.
+The little movement seen at 2.53 mm looks like creep, which would also explain
+why the contaminated earlier run gave a different figure: how far it creeps
+depends on time and disturbance, not on how far the spindle went.
+
+Consequences:
+
+- The backlash compensation is **inert**, not undersized. No setting fixes it,
+  because the problem is that retraction transmits no motion. `STATOR_BACKLASH_MM`
+  is back to 0.25 and `STATOR_HOME_BACKOFF_MM` to 0.2, since a larger value costs
+  travel and buys nothing. David's judgement that the raised values were overly
+  large was right, though not for the reason either of us had.
+- **A retracting move does not reposition the stage, and the position reported
+  after one is not to be believed.** Only advancing moves position the axis.
+- **Homing must not be run.** Its approach depends on backing off past the edge
+  and coming back, and the backoff moves nothing, so it would latch a datum from
+  a stationary stage.
+- The fix is mechanical: preload the stage against the spindle. Then the
+  compensation becomes meaningful and all of this needs re-measuring.
+
+What survives from the earlier work is the advancing behaviour, which is
+excellent. Three separate advancing crossings of the datum edge, separated by
+retractions of hundreds of microsteps and hundreds of moves, landed at 2794,
+2795, and 2796 microsteps: about one microstep, 3.2 um, per cycle. Whether that
+one-per-cycle progression is a slow real drift or a single lost step is not yet
+separable, but either way it is eight times inside the 25.4 um the design
+budgeted.
