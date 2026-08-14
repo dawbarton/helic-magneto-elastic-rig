@@ -562,3 +562,42 @@ Two things this does not fix, both worth watching:
 
 Not yet flashed: the rig is still running `7017c41` with the demonstration
 settings, and a reflash would clear them.
+
+## Wake fix confirmed, advance direction confirmed, opto scan inconclusive (2026-08-14)
+
+Three results, in descending order of confidence.
+
+**The 100 ms wake fixed a real fault.** Before it, moves of fewer than about
+four steps were variably successful; after it they are reliable, with no
+evidence of missed steps. This is the symptom the mechanical argument predicted:
+a short move is all start transient, so a rotor still ringing from
+re-energisation swallows it entirely, while a long move loses only its first few
+steps and hides them in the noise. The 5 ms wake was the defect.
+
+**`STATOR_ADVANCE_INCREASES_READING = true` is confirmed.** A `+0.635` jog
+increases the micrometer reading, measured by eye. The constant was a guess and
+is now a measurement.
+
+**The opto scan did not find the edge.** Firmware `d600966` plus the new opto
+telemetry was flashed, the stage was manually positioned so the sensor was
+triggering, and the axis advanced 200 steps in ten 20-step jogs at 0.15 mm/s.
+`stator_opto` read 1 throughout and `stator_opto_edge` stayed NaN, so no
+transition occurred within 0.635 mm of advance. Zero faults.
+
+Two readings of that, not yet separated:
+
+- The edge lies further along than one revolution in the increasing direction.
+- The triggered half-plane extends in the increasing direction, so the edge lies
+  *below* the manual start position and advancing will never reach it. The opto
+  is an edge, not a vane, so this is a live possibility rather than a pedantic
+  one, and it is the dangerous one: continuing to advance would then be driving
+  toward whichever extreme carries the hard stop.
+
+Scanning stopped at +200 steps pending a decision, because the direction of the
+hard stop relative to increasing reading is still unknown. Nothing about the
+datum geometry, `STATOR_DATUM_AT_ADVANCED_EXTREME` or
+`STATOR_DATUM_CLEARANCE_MM`, is settled by this run.
+
+Also now measured: `stator_opto` reads 1 with the flag in the sensor, so
+triggered is high. The earlier multimeter reading of GP27 low was the untriggered
+state, not a wiring fault.
