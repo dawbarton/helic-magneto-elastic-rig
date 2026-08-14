@@ -601,3 +601,46 @@ datum geometry, `STATOR_DATUM_AT_ADVANCED_EXTREME` or
 Also now measured: `stator_opto` reads 1 with the flag in the sensor, so
 triggered is high. The earlier multimeter reading of GP27 low was the untriggered
 state, not a wiring fault.
+
+## Opto edge located at 2794 steps, and it did not come back (2026-08-14)
+
+Continuing the advancing scan from +1000 steps, sanctioned to a further ten
+revolutions. The opto released during the ninth, with `stator_opto` going 1 to 0
+and `stator_opto_edge` latching **2794 steps** from the manual start position.
+Zero faults over 27 moves.
+
+That settles the polarity question the other way from my reading of it: high is
+the state at lower readings and low at higher, so the earlier multimeter low at
+the original position simply means that position was above the edge. The manual
+reposition had put the stage well below it. Advancing was the right direction
+after all; it was just 14 revolutions away rather than the one or two expected.
+
+In distance, 2794 steps is 8.871 mm, 0.3492 inch, 13.97 barrel revolutions. The
+latch fires on the counted step, which leads the mechanism by up to the eight
+word FIFO, so the true crossing lies in [2786, 2794] steps, a 25 um window.
+
+**The refinement then failed, informatively.** To pin the edge without the FIFO
+lead, the axis backed off 30 steps below the latch and crept up in single
+settle-stepped jogs. At 2770 steps the opto still read **0**, and the first
+1-step advance kept it at 0. Backing off 24 steps below the crossing did not
+restore the untriggered state.
+
+Two candidate explanations, not yet separated, and the distinction matters more
+than the edge value does:
+
+- **The stage did not follow the retract.** With no preload the spindle can back
+  away and leave the stage behind, so the flag never moved below the edge, and
+  the backlash take-up then simply re-contacted it where it already was. This is
+  the central mechanical assumption of the whole axis design, and this would be
+  the first direct evidence against the retract-then-advance scheme doing
+  anything at all.
+- **Sensor hysteresis.** An opto interrupter with a Schmitt output has some, but
+  95 um of it would be a great deal.
+
+The test that separates them: retract several hundred steps, well past any
+plausible hysteresis, and advance back. If the opto returns to 1 and releases
+again near 2794 the sensor has modest hysteresis and the stage does follow. If
+it never returns to 1, the stage is not following retraction at all.
+
+Until that is answered, no position derived from a retract should be trusted,
+and the `move_to` backlash compensation is unproven.
