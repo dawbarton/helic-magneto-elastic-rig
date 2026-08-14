@@ -756,3 +756,86 @@ retractions of hundreds of microsteps and hundreds of moves, landed at 2794,
 one-per-cycle progression is a slow real drift or a single lost step is not yet
 separable, but either way it is eight times inside the 25.4 um the design
 budgeted.
+
+## The 18 us parameter-write cost is a fixed-size command copy (2026-08-14)
+
+Every parameter write, of any kind, adds about 19 us to the tick that applies
+it. This closes the open item recorded earlier: it is not the stator, it is not
+this rig, and it is not the handler for the parameter written. It is the
+platform copying a fixed 140-byte `RtCommand` out of the cross-core queue,
+whatever the command actually carries.
+
+The delay is by now well constrained. All measurements at 8 kHz with the laser,
+exciter, and stepper powered down, so only the analogue path and the network
+were live.
+
+| Condition | `loop_time_max` | `t_rest_max` |
+|---|---|---|
+| Quiet, no traffic | 44 us | 15 us |
+| 20 reads over TCP, no command | 45 us | 16 us |
+| Writes, rig domain (`rig_stator_dwell`) | 64 us | 35 us |
+| Writes, program domain (`table_gain`, `table_interp`) | 63 us | 35 us |
+| Writes, 33-float block (`target_coeffs`, `forcing_coeffs`) | 64 us | 35 us |
+
+Four things fall out of that table. Reads cost nothing, so it is not core-0
+network activity: a GET and a SET differ on core 0 only by the enqueue.
+`t_measure_max` and `t_actuate_max` never move, so all of it is in the rest of
+the tick, not in the ADC or DAC transfers. Rig-domain and program-domain writes
+cost the same, so it is common dispatch rather than either handler. And a
+33-float write costs exactly what a 1-float write costs, which is the tell: the
+cost does not depend on how much data the command carries.
+
+The mechanism is visible in the disassembly. `Payload::Values` is a fixed
+`[f32; 33]` inline array, so `RtCommand` is 140 bytes regardless of variant, and
+the dispatch path in `run_rt_tick` copies that struct roughly three times per
+command through a runtime-dispatched `__aeabi_memcpy`. `set_rig_param` and
+`apply_program` themselves are a few tens of instructions and entirely SRAM
+resident; there is no flash execution anywhere on the path, and the layout gate
+is not being evaded.
+
+Confirmed by scaling rather than by reading code. The platform has a
+`diag-wide-command-payload` feature that widens `MAX_RT_VALUES` from 33 to 132,
+taking `RtCommand` from 140 to 536 bytes and changing nothing else:
+
+| Build | `RtCommand` | Quiet | Write | Extra |
+|---|---|---|---|---|
+| Default | 140 bytes | 44 us | 64 us | 20 us |
+| `diag-wide-command-payload` | 536 bytes | 44 us | 118 us | 74 us |
+
+Extra cost against struct size is a straight line through those two points at
+0.136 us/byte, about 20 cycles per byte at 150 MHz, with an intercept of 0.9 us.
+So under a microsecond of the write is real work, and essentially all of the
+rest is the copy. The platform already knows this: the comment on
+`MAX_RT_VALUES` records that "hardware timing rejected copying 132 values
+through this envelope", which is the 118 us build, 7 us short of the 125 us
+period.
+
+**It predates the stator.** Flashing `dd215ec`, the last commit before the axis
+existed, and repeating: quiet 43 us, any write 63 us, `t_rest` 14 us to 35 us.
+Identical within resolution. What the stator did add is about 1 us to the quiet
+baseline, 43 to 44 us, which is the extra atomic load publishing
+`stator_position_mm` as a source, exactly as its commit message claimed.
+
+Two practical points, neither urgent.
+
+The realised worst case is one command per tick, not the two
+`COMMANDS_PER_TICK` allows. Writes through the control protocol are
+request/response, so core 0 cannot enqueue faster than about 1 kHz; pipelining
+four SET frames into a single TCP write still left `cmd_backlog_max` at 1, and
+sustained writing gave no overruns and no clock jitter. The bound is therefore
+64 us in practice against a 125 us period, and 85 us in principle if two ever
+did land together.
+
+`max_loop_us = 60` in `rig-profile.toml` is exceeded by any parameter write.
+The regression does not catch this because `measure_phase` resets diagnostics
+and then measures a window containing no writes, so the limit is in effect a
+quiescent limit that is never tested against a command tick. Left as it is
+rather than quietly raised: what that number is asserting is a decision worth
+making deliberately, since the honest WCET is 85 us.
+
+The fix, if it is ever worth making, is upstream and structural: make the queue
+element small, either by moving the inline `Values` array behind the
+`ValueBuffer` mechanism the platform already has for wider vectors, or by
+sizing the payload to the harmonics a given experiment actually uses. Nothing
+in this repository can address it, and at 64 us against 125 us there is no
+operational reason to.
