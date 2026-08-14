@@ -33,6 +33,15 @@ pub static STATOR_HOMED: AtomicU32 = AtomicU32::new(0);
 /// lost-step audit; its noise floor is the datum's own repeatability, about 64
 /// microsteps. See `docs/stator-stage.md`.
 pub static STATOR_HOME_ERROR: AtomicU32 = AtomicU32::new(0);
+/// Raw opto sensor level, 1 when the input reads high. Deliberately the pin
+/// level rather than `beyond_datum`, so commissioning can establish the
+/// sensor's polarity instead of assuming `STATOR_OPTO_HIGH_BEYOND_DATUM`.
+pub static STATOR_OPTO: AtomicU32 = AtomicU32::new(0);
+/// Step count at which the opto level last changed. Latched in the stepping
+/// path, so the edge is located to the step that crossed it rather than to
+/// whenever the host next asked. Meaningless until an edge has been seen.
+pub static STATOR_OPTO_EDGE: AtomicU32 = AtomicU32::new(NAN_BITS);
+
 /// Completed moves, for wear and audit.
 pub static STATOR_MOVES: AtomicU32 = AtomicU32::new(0);
 /// Commands rejected or abandoned: out of range, not homed, gate armed, or a
@@ -83,6 +92,8 @@ pub const EXTRA_PARAMS: &[ExtraParam] = &[
     ExtraParam::u32("stator_state", &STATOR_STATE),
     ExtraParam::u32("stator_homed", &STATOR_HOMED),
     ExtraParam::f32("stator_home_error", &STATOR_HOME_ERROR),
+    ExtraParam::u32("stator_opto", &STATOR_OPTO),
+    ExtraParam::f32("stator_opto_edge", &STATOR_OPTO_EDGE),
     ExtraParam::u32("stator_moves", &STATOR_MOVES),
     ExtraParam::u32_event("stator_faults", &STATOR_FAULTS),
 ];

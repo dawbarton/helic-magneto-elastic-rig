@@ -38,7 +38,8 @@ use crate::step_pio::StepPulser;
 use crate::telemetry::{
     StatorState, STATOR_BACKLASH_MM, STATOR_COMMAND, STATOR_DATUM_MM, STATOR_DWELL_S,
     STATOR_FAULTS, STATOR_HOLD, STATOR_HOMED, STATOR_HOME_ERROR, STATOR_JOG_MM, STATOR_MOVES,
-    STATOR_POSITION_MM, STATOR_RATE_MM_S, STATOR_STATE, STATOR_STEPS, STATOR_TARGET_MM,
+    STATOR_OPTO, STATOR_OPTO_EDGE, STATOR_POSITION_MM, STATOR_RATE_MM_S, STATOR_STATE,
+    STATOR_STEPS, STATOR_TARGET_MM,
 };
 
 /// Command kinds packed into the low byte of [`STATOR_COMMAND`].
@@ -102,6 +103,9 @@ pub struct StatorAxis {
     /// Mirrors the DIR pin so a same-direction move skips the drain and any
     /// diagnostic dwell. Starts retracted, matching the level board.rs sets.
     dir_advance: bool,
+    /// Last opto level seen, so a change can be attributed to the step that
+    /// caused it. `None` until the first sample.
+    last_opto: Option<bool>,
 }
 
 /// Read a commanded `f32`, falling back to its compile-time default if the
@@ -172,6 +176,22 @@ impl StatorAxis {
     /// between it and the hard stop.
     fn beyond_datum(&self) -> bool {
         self.opto.is_high() == config::STATOR_OPTO_HIGH_BEYOND_DATUM
+    }
+
+    /// Publish the opto level, latching the step count whenever it changes.
+    /// Called after every queued step and once per idle poll, so an edge found
+    /// mid-move is located to a step rather than to a host poll. The step count
+    /// leads the mechanism by up to the FIFO depth, so callers wanting the edge
+    /// to a step should settle-step across it.
+    fn sample_opto(&mut self) {
+        let level = self.opto.is_high();
+        STATOR_OPTO.store(level as u32, Ordering::Relaxed);
+        if self.last_opto != Some(level) {
+            if self.last_opto.is_some() {
+                STATOR_OPTO_EDGE.store((self.steps as f32).to_bits(), Ordering::Relaxed);
+            }
+            self.last_opto = Some(level);
+        }
     }
 
     fn abort_reason(&self) -> Option<Abort> {
@@ -284,6 +304,7 @@ impl StatorAxis {
         if settle {
             self.drain(period_us).await;
         }
+        self.sample_opto();
         self.publish();
         Ok(())
     }
@@ -571,6 +592,7 @@ impl StatorAxis {
                 self.de_energise();
             }
 
+            self.sample_opto();
             Timer::after_millis(20).await;
         }
     }
@@ -602,6 +624,7 @@ pub async fn stator_task(parts: StatorParts, shared: &'static RtShared) -> ! {
         homed: false,
         settled: false,
         energised: false,
+        last_opto: None,
         seen_command: STATOR_COMMAND.load(Ordering::Relaxed),
         dir_advance: false,
     };
