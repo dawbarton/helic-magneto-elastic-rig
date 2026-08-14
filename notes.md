@@ -84,17 +84,30 @@ change of analogue board, specimen, or exciter.
   then it establishes only that the output path moves, not by how much. Note
   also that this makes `drive` sensitive to cape changes in a way a direct DAC
   tap would not be, so recheck it after any analogue board swap.
-- **The stator stage is entirely unverified in hardware.** Firmware for the
-  stepper-driven micrometer landed on 2026-08-12 and nothing about it has been
-  wired, moved, or measured. `docs/stator-stage.md` is the design and the
-  commissioning procedure; until that procedure has been run, treat every
-  number about the axis as an assumption. In particular the fitted motor is
-  unidentified, so 200 full steps per revolution and direct coupling to the
-  barrel are guesses, and `STATOR_MICROSTEPS` is deliberately left at 1.0
-  because guessing it low under-travels while guessing it high drives into the
-  end stop. Nothing protects against that second case in software: the soft
-  travel limits are converted to steps with the same constant, so the
-  current-limit potentiometer is the real backstop and should be set low.
+- **The stator stage has moved, but is not calibrated or homed.** The axis was
+  wired and first driven on 2026-08-14, two jogs of one revolution, and the
+  firmware emitted exactly the steps it should. Everything else about it is
+  still an assumption: the fitted motor is unidentified, so 200 full steps per
+  revolution and direct coupling to the barrel are guesses; the direction
+  convention, the opto polarity, and the datum geometry are unconfirmed; and
+  the axis has never been homed. `docs/stator-stage.md` holds the commissioning
+  procedure, and none of it beyond first motion has been done.
+- **Microstepping is not strapped**, so `STATOR_MICROSTEPS` stays at 1.0 and
+  the driver is in full step, 3.175 µm per step. Raising that constant without
+  strapping MS1/MS2 makes every move eight times too long, into the end stop,
+  and the soft travel limits do not protect against it because they are
+  converted to steps with the same constant. The current-limit potentiometer is
+  the real backstop and should be set low.
+- **Do not home until the datum geometry is measured.** A homing search is
+  bounded by `STATOR_SEEK_MAX_MM`, currently 6.5 mm, so it can travel far
+  outside any envelope that has been shown to be safe by hand. It also needs
+  `STATOR_DATUM_AT_ADVANCED_EXTREME` and `STATOR_DATUM_CLEARANCE_MM` to be
+  right, and both are still guesses.
+- **Jog order matters while the axis is unsettled.** A move approaches its
+  target from one backlash allowance below it, so a retracting jog travels
+  further than it asks: from rest, `jog -0.635` swings to -0.886 mm, which is
+  1.4 revolutions, while `jog +0.635` is a pure advance of exactly one. When a
+  bound on travel has been established by hand, advance into it first.
 - **Laser measuring rate.** The optoNCDT is configured at startup from
   `SAMPLE_RATE`, and expects the factory 921.6 kBaud setting.
 - **Flashing.** Flash with `cargo run --release`, which uses `probe-rs run`.
@@ -360,3 +373,65 @@ Still to establish before the first home:
 - **Whether stepping during a capture is ever wanted.** The firmware does not
   forbid it, because the noise characterisation needs it, but the `stator`
   source makes a violation visible after the fact.
+
+### Stator stage, first motion (2026-08-14)
+
+The stepper, its MP6500 carrier, the opto sensor, and the ENABLE line on GP28
+are wired. Microstepping is **not** strapped, so the driver is in full step and
+`STATOR_MICROSTEPS` stays at 1.0, which is what the firmware already assumed.
+
+Exact clean W5500 firmware `0.1.0 6f5da2f`, flashed with `cargo run --release`.
+It came up reporting 16 sources and 57 parameters, logged `stator: axis ready,
+not homed`, and the axis read `stator_state` 3 (not homed), `stator_steps` 0,
+`stator_position_mm` NaN, `stator_faults` 0, with the gate disarmed.
+
+The stage was in a position where one revolution either way was safe by hand,
+so the test was two jogs of one revolution, 0.635 mm, advancing first:
+
+- `rig_stator_jog 0.635`: `stator_steps` 0 to **exactly 200**, `stator_moves` 1,
+  `stator_faults` 0. A pure advance, because the target sat above the unsettled
+  start point;
+- `rig_stator_jog -0.635`: back to **exactly 0**, `stator_moves` 2,
+  `stator_faults` 0. A poll during the move caught `stator_state` 1 (moving) at
+  step 24, mid-retract on the way to -79, which is the backlash undershoot
+  before the final advance;
+- 176 steps in the ~1.12 s to that poll is 157 steps/s, matching the configured
+  0.5 mm/s exactly.
+
+Excursion envelope was -0.2508 mm to +0.635 mm, that is -0.395 to +1.000
+revolutions, inside the sanctioned one revolution either way. Advancing first is
+what kept it there; see the standing constraint above on jog order.
+
+**What this does and does not establish.** It establishes that the firmware
+emits exactly the steps commanded, that direction changes and the
+retract-then-advance approach sequence execute, that the rate is right, and that
+the command and telemetry surface works end to end. It establishes **nothing**
+about the mechanism: the step count is what the PIO was asked to emit, not
+independent confirmation that the motor turned, that the coupling held, or which
+physical direction "advance" is. The axis was deliberately not homed.
+
+Real-time behaviour was untouched by the stepping, which is the architectural
+claim the axis rests on:
+
+- `loop_time_max` 45 µs at rest, against 44 µs recorded before the stage
+  existed. The extra atomic load in `measure` costs about 1 µs, as expected;
+- zero overruns, zero tick timeouts, and jitter of at most 1 µs across the whole
+  run, including while stepping.
+
+**An incidental finding, not caused by this work.** Any parameter write pushes
+`loop_time_max` from 45 µs to 63-64 µs, which is over the profile's 60 µs guard.
+It is not stator-specific and not new: after a `diag-reset` the same 63-64 µs
+appears from a plain `rig_laser_range` write and from a program-domain
+`table_mode` write, as well as from a stator command, and the stator's own
+`set_param` adds nothing measurable on top. So applying a parameter write costs
+about 18 µs on the tick that applies it. No overrun or tick timeout resulted,
+and against the 125 µs period at 8 kHz there is ample real margin; the 60 µs
+figure is a self-imposed guard rather than a deadline. It is probably invisible
+to `helic-rt-regression` because that resets diagnostics after its own quieting
+writes. Worth raising against the platform rather than working around here.
+
+Next, in order: confirm by hand that the motor actually turned and in which
+direction, so `STATOR_DIR_ADVANCE_HIGH` and `STATOR_ADVANCE_INCREASES_READING`
+stop being guesses; check the barrel returns to its starting reading, which is
+the first evidence about lost steps and coupling slip; then measure the datum
+geometry before any homing, and only then the steps-per-millimetre check.
