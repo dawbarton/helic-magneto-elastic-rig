@@ -59,13 +59,13 @@ static_cell.workspace = true
 # Platform crates, pinned to one HELIC-DAQ release. Upgrading is a deliberate
 # edit: read the tag message for consumer-visible changes first.
 [workspace.dependencies]
-helic-core = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.2" }
-helic-drivers = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.2" }
-helic-rt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.2" }
-helic-fw-build = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.2" }
-helic-fw-optoncdt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.2" }
-helic-fw-rt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.2", features = ["rt-sram"] }
-helic-fw-support = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.2", default-features = false }
+helic-core = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.3" }
+helic-drivers = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.3" }
+helic-rt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.3" }
+helic-fw-build = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.3" }
+helic-fw-optoncdt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.3" }
+helic-fw-rt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.3", features = ["rt-sram"] }
+helic-fw-support = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.3", default-features = false }
 
 # Embassy versions must match those the pinned platform crates were built
 # against (`firmware/Cargo.toml` at that tag). A mismatch presents as type

@@ -1080,3 +1080,33 @@ held connection are fine again.
 
 This is almost certainly what the two earlier unexplained unreachable episodes
 were, and what the stale connection at the start of this session was.
+
+## The blocking-RTT trap is now a gate, and the hazard is narrower than stated (2026-08-14)
+
+Two refinements to the correction above.
+
+The firmware does not default to blocking. `defmt-rtt` initialises its control
+block to non-blocking, and **probe-rs writes the blocking mode when it
+attaches**; nothing rewrites it when the debugger goes away. So the hazard is
+specifically a probe that attached and detached without a reset, not the mere
+absence of one. Measured here on a build without the feature, same image:
+
+| Boot | 20 ms reads |
+|---|---|
+| Flashed by `cargo run`, probe then killed | dies after 486 reads, 13.27 s |
+| `probe-rs reset`, which never attaches RTT | survives 4214 reads, 90 s |
+
+Every `cargo run` does it, and the regression detaches deliberately before
+opening its host connection, so it covers the whole workflow here. It does
+mean a rig power-cycled since its last flash was never at risk.
+
+It is now gated rather than remembered. `helic-deps-check` fails any workspace
+whose `defmt-rtt` resolves without `disable-blocking-mode`, unconditionally
+and with no entry in `dependency-policy.toml`, so this rig and any future one
+inherit it for free. Confirmed here both ways: removing the feature fails the
+gate with the fix quoted in the message, restoring it passes.
+
+Repinned to v0.2.3 and re-verified end to end: all six gates, and the full
+default `helic-rt-regression` with no probe attached reports no acceptance
+errors, 606 writes in the write phase at 45 us against the 60 us limit, 8000
+records, no lost packets, no index gaps.
