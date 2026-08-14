@@ -17,9 +17,11 @@ the 8 kHz hardware-clocked acquisition path, the DAC output path, networking,
 discovery, the parameter registry, and UDP streaming of all 15 sources. The
 figures under "Bring-up evidence" below are the current acceptance record.
 
-The stator stage added on 2026-08-12 is **not** covered by any of this: it has
-never been connected. See the standing constraint below and
-`docs/stator-stage.md`.
+The stator stage is only partly covered. It was wired and first driven on
+2026-08-14: the firmware's step generation, command surface, and telemetry are
+verified, and stepping leaves the real-time loop undisturbed. Nothing about the
+mechanism is, and the axis has never been homed. See the standing constraints
+below and `docs/stator-stage.md`.
 
 Exceptions, all electrical rather than real-time. The DAC output path is
 verified as it was driven before 2026-08-12, with channel A alone against a
