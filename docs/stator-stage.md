@@ -105,8 +105,14 @@ The firmware assumes both changes will be made. Until they are:
 - the ENABLE output will simply drive a pin nothing is connected to, which is
   harmless.
 
-Fit an external pull-down on the ENABLE line so that a reset or unpowered
-microcontroller leaves the motor de-energised rather than floating.
+The ENABLE input is **active low** on the fitted carrier, measured on the bench
+rather than assumed: a low level energises the motor, so the pin rests high.
+Because that input also has an internal pull-down, a microcontroller in reset or
+unpowered floats the driver **enabled**. Fit an external pull-up to the 3.3 V
+the connector already carries on pin 2, so a dead controller leaves the motor
+de-energised. Note this is the opposite of what an active-high enable would
+want, and an earlier revision of this document recommended a pull-down on that
+mistaken basis.
 
 ### Grounding and supply
 

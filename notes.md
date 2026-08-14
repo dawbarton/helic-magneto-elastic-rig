@@ -110,6 +110,17 @@ change of analogue board, specimen, or exciter.
   further than it asks: from rest, `jog -0.635` swings to -0.886 mm, which is
   1.4 revolutions, while `jog +0.635` is a pure advance of exactly one. When a
   bound on travel has been established by hand, advance into it first.
+- **Open: confirm the parameter-write tick cost on the pre-stator firmware.**
+  Applying any parameter write costs about 18 µs on the tick that applies it,
+  taking `loop_time_max` from 45 µs to 63-64 µs and over the profile's 60 µs
+  guard (2026-08-14 entry below). The evidence that this is pre-existing is
+  circumstantial: it appears equally for a `rig_laser_range` write, a
+  program-domain `table_mode` write, and a stator command, and the stator's own
+  `set_param` adds nothing on top. That is strong but not proof, because adding
+  the stator changed code layout and could in principle have moved something
+  hot. The definitive test is to flash `e962260`, the last pre-stator image,
+  `diag-reset`, write one parameter, and read `loop_time_max`. Do that before
+  raising it against the platform.
 - **Laser measuring rate.** The optoNCDT is configured at startup from
   `SAMPLE_RATE`, and expects the factory 921.6 kBaud setting.
 - **Flashing.** Flash with `cargo run --release`, which uses `probe-rs run`.

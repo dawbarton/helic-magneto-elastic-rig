@@ -106,10 +106,20 @@ pub const STATOR_MM_PER_MICROSTEP: f32 = if STATOR_ADVANCE_INCREASES_READING {
 /// DIR level that advances the spindle, pushing the stage. Hardware fact.
 pub const STATOR_DIR_ADVANCE_HIGH: bool = true;
 
-/// ENABLE (nSLEEP) level that energises the driver. The MP6500 sleeps when
-/// nSLEEP is low, so this is high; fit an external pull-down so that a reset
-/// or unpowered microcontroller leaves the motor de-energised.
-pub const STATOR_ENABLE_ACTIVE_HIGH: bool = true;
+/// ENABLE level that energises the driver.
+///
+/// The fitted carrier uses the A4988-compatible **active-low** enable, so a low
+/// level energises the motor. Measured on the bench on 2026-08-14, after an
+/// initial guess of active-high left the driver disabled for the whole of every
+/// commanded move and the motor did not turn at all. Like `DAC_POLARITY`, this
+/// describes the fitted hardware and is not a free choice.
+///
+/// The pin therefore rests high, and the enable input has an internal
+/// pull-down, so a microcontroller in reset or unpowered floats the driver
+/// **enabled**. Fit an external pull-up to the 3.3 V the connector already
+/// carries on pin 2, so the resting state of a dead controller is a
+/// de-energised motor.
+pub const STATOR_ENABLE_ACTIVE_HIGH: bool = false;
 
 /// Opto sensor level seen beyond the datum edge, that is on the short side
 /// between the edge and the hard stop. The sensor is an edge rather than a
