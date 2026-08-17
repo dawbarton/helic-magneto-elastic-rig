@@ -19,9 +19,11 @@ figures under "Bring-up evidence" below are the current acceptance record.
 
 The stator stage is only partly covered. It was wired and first driven on
 2026-08-14: the firmware's step generation, command surface, and telemetry are
-verified, and stepping leaves the real-time loop undisturbed. Nothing about the
-mechanism is, and the axis has never been homed. See the standing constraints
-below and `docs/stator-stage.md`.
+verified, and stepping leaves the real-time loop undisturbed. Of the mechanism,
+the datum edge and the reversal dead band are measured as of 2026-08-17, and
+the datum geometry, the steps per millimetre and the travel limits are not. The
+axis has never been homed. See the standing constraints below and
+`docs/stator-stage.md`.
 
 Exceptions, all electrical rather than real-time. The DAC output path is
 verified as it was driven before 2026-08-12, with channel A alone against a
@@ -88,11 +90,14 @@ change of analogue board, specimen, or exciter.
   tap would not be, so recheck it after any analogue board swap.
 - **The stator stage has moved, but is not calibrated or homed.** The axis was
   wired and first driven on 2026-08-14, two jogs of one revolution, and the
-  firmware emitted exactly the steps it should. Everything else about it is
-  still an assumption: the fitted motor is unidentified, so 200 full steps per
-  revolution and direct coupling to the barrel are guesses; the direction
-  convention, the opto polarity, and the datum geometry are unconfirmed; and
-  the axis has never been homed. `docs/stator-stage.md` holds the commissioning
+  firmware emitted exactly the steps it should. The direction convention and
+  the opto polarity are now measured, and since the mechanical rework of
+  2026-08-17 the stage follows a retraction with a 19-microstep reversal dead
+  band and a datum edge repeatable to under one microstep. Everything else
+  about it is still an assumption: the fitted motor is unidentified, so 200
+  full steps per revolution and direct coupling to the barrel are guesses; the
+  datum geometry is unconfirmed, and the two constants describing it
+  contradict the measured opto polarity; and the axis has never been homed. `docs/stator-stage.md` holds the commissioning
   procedure, and none of it beyond first motion has been done.
 - **Microstepping is not strapped**, so `STATOR_MICROSTEPS` stays at 1.0 and
   the driver is in full step, 3.175 µm per step. Raising that constant without
@@ -702,6 +707,11 @@ of it only, and the spindle-to-stage contact adds more on top.
 
 ## The retract does not move the stage: backlash compensation is inert (2026-08-14)
 
+**Superseded on 2026-08-17 by the mechanical rework**, after which the stage
+does follow a retraction and the dead band is 19 microsteps. The section is
+kept because it is what the axis did before the rework, and because the
+harness bug it identifies is a real one. See the last entry in this file.
+
 The 0.697 mm dead band recorded above is wrong, and so was the reasoning that
 raised the constants. Retracting it.
 
@@ -1110,3 +1120,111 @@ Repinned to v0.2.3 and re-verified end to end: all six gates, and the full
 default `helic-rt-regression` with no probe attached reports no acceptance
 errors, 606 writes in the write phase at 45 us against the 60 us limit, 8000
 records, no lost packets, no index gaps.
+
+## The stage now follows a retraction: dead band 19 microsteps (2026-08-17)
+
+David reworked the coupling between the stage and the stepper, to get a better
+mechanical connection than the push-only contact of 2026-08-14. The rework is
+his to describe; what follows is only what the axis now does. Measured on the
+image already flashed, `0.1.0 9be46f2`, which is one commit behind `main` and
+differs from it only by the platform repin to v0.2.3, nothing in the axis.
+
+**The datum edge is at 184 microsteps** from the power-on counter zero, that
+is 0.584 mm of advance from wherever the stage sat when it booted. Found by
+advancing in 100-microstep jogs with the host polling during each move and
+issuing `rig_stator_stop` on the first opto change, so the overshoot past the
+edge was bounded by the poll interval rather than by the jog length. It turned
+up in the second jog: the stage was already sitting just below the edge.
+
+**The stage follows a retraction now.** This is the result that matters, and it
+reverses the 2026-08-14 finding directly. With `rig_stator_backlash` set to
+0.001 mm, which rounds to zero microsteps and so makes a negative jog a pure
+retract, 64 microsteps of retraction (0.203 mm) brought the opto back to 1. On
+2026-08-14 the same axis was retracted 503 microsteps (1.6 mm) and crossed
+nothing at all. The backlash compensation is therefore no longer inert, and
+`move_to`'s retract-then-advance sequence does what it was written to do.
+
+Note that `rig_stator_backlash` rejects an exact zero: it validates as
+`> 0.0`, so 0.001 mm is the way to ask for a pure retract.
+
+### The crossings, settle-stepped
+
+Single-microstep jogs remove the FIFO lead, because each move drains the queue
+before it reports, so the published level belongs to the settled step. Three
+retract-advance cycles, then a further two as a logged sweep 45 microsteps
+either side of the edge:
+
+| Quantity | Value |
+|---|---|
+| Retracting crossing | 165 microsteps, all five cycles |
+| Advancing crossing | 184 microsteps, all five cycles |
+| Reversal dead band | **19 microsteps, 60.3 um** |
+| Advancing spread | **0 microsteps**, so under 3.175 um |
+
+The sweep also shows the transition is clean: one change of level in each
+direction over 45 microsteps either side, no chatter near the edge. The figure
+is `edge_sweep.png`, regenerated from `edge_sweep.csv` by the harness described
+below.
+
+Two consequences for the constants, and neither needs a change:
+
+- `STATOR_BACKLASH_MM` at 0.25 mm is 79 microsteps, four times the measured
+  dead band. Correct as it stands, and the small value David preferred on
+  2026-08-14 is now right for the right reason rather than by accident.
+- `STATOR_HOME_BACKOFF_MM` at 0.2 mm is 63 microsteps, comfortably past the
+  dead band. Homing's back-off-and-reapproach would now actually move the
+  flag, which it could not before. That removes one of the two reasons homing
+  was blocked; the other is still open, below.
+
+### The FIFO lead is 10 to 11 microsteps, not 8
+
+The coarse scan's latches can be differenced against the settle-stepped truth,
+in both directions:
+
+| Pass | Latched | Settled truth | Lead |
+|---|---|---|---|
+| Advancing, coarse scan | 194 | 184 | 10 |
+| Advancing, dead-band run | 195 | 184 | 11 |
+| Retracting, dead-band run | 154 | 165 | 11 |
+
+So `stator_opto_edge` read from a normal move leads the mechanism by 10 to 11
+microsteps, 32 to 35 um, rather than the eight the design assumed. The extra
+words are the OSR and the pulse in flight on top of the eight-word joined FIFO.
+It does not affect homing, which settle-steps its approach for exactly this
+reason, but it does mean an edge latched during an ordinary move is worth about
+35 um, not 25, and `docs/stator-stage.md` understates it in two places.
+
+### Still blocked: the datum geometry, and a constant that contradicts it
+
+Homing must still not be run, for the one remaining reason. Which extreme of
+travel the datum sits at, and how much clearance lies between the edge and the
+hard stop, are both still unmeasured guesses.
+
+The measurements do, though, expose an inconsistency in the pair of constants
+that describe the geometry. `STATOR_OPTO_HIGH_BEYOND_DATUM` is `true` and
+`STATOR_DATUM_AT_ADVANCED_EXTREME` is `true`, which together assert that the
+opto reads high on the advanced side of the edge. It reads **low** there:
+advancing takes it 1 to 0, on every crossing recorded since 2026-08-14. So at
+least one of the two is wrong, and `beyond_datum()` currently returns `false`
+while the stage sits on the advanced side of the edge. Which one to change
+depends on which side carries the hard stop, which is the same physical
+measurement homing is already waiting on. Do not resolve it by flipping a
+constant until the stop has been found by hand.
+
+### Zero disturbance to the real-time loop
+
+320 completed moves over the session, `stator_faults` 0 throughout,
+`loop_time_max` 45 us against the 60 us profile limit, `overruns` 0, and
+`records_dropped` unchanged at its pre-session 497. The architectural claim
+that the axis cannot disturb core 1 continues to hold under a few hundred
+moves.
+
+### Harness
+
+Four short host scripts, kept in the session scratchpad rather than the
+repository: an advancing scan with stop-on-edge, a dead-band ladder, a
+settle-stepped refinement, and a logged sweep with its plot. All wait on
+`stator_moves`, the completed-move counter, which is the fix for the
+2026-08-14 harness bug that waited on `stator_state` and issued its next
+command into a still-running move. Ask before relying on them again: they are
+diagnostic scaffolding, not a committed tool.

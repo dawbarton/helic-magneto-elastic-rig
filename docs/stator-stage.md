@@ -170,7 +170,12 @@ must be raised to `8.0` only once the strapping is confirmed by inspection.
 
 Previous testing indicates the opto sensor gives about 1/1000 inch, that is
 25.4 µm, of repeatability. That is 8 full steps, or 64 microsteps, and it is
-the dominant error term. Three consequences:
+the dominant error term. **The budget below is the conservative one and has not
+yet been revised**, but it now looks pessimistic: five settle-stepped advancing
+crossings of the datum edge on 2026-08-17 all landed on the same microstep, so
+the edge itself repeats to better than 3.175 µm. That is the sensor and the
+approach, not the whole homing sequence, which has still never been run. Three
+consequences follow from the budgeted figure:
 
 - **Relative moves are far more precise than absolute ones.** Step counting
   resolves 0.4 µm; the datum is good to 25 µm.
@@ -183,12 +188,21 @@ the dominant error term. Three consequences:
 
 These dominate the design and are worth understanding before using the axis.
 
-### The stage is not spring preloaded
+### The stage is coupled to the spindle, but the coupling is the weak point
 
-A micrometer spindle can push but it cannot pull. With no preload spring, the
-stage follows the spindle when advancing and is simply released when
-retracting: **after a retract, the stage position is undefined** until a
-subsequent advance re-establishes contact.
+A micrometer spindle can push but it cannot pull. Without something holding the
+stage against it, the stage follows the spindle when advancing and is simply
+released when retracting, leaving its position undefined after a retract until
+a subsequent advance re-establishes contact. That was the axis as first built,
+and it was measured on 2026-08-14: 1.6 mm of retraction moved the stage past
+nothing at all.
+
+Since the mechanical rework of 2026-08-17 the stage does follow a retraction,
+with a reversal dead band of 19 microsteps, 60 µm. **The firmware still assumes
+the weaker case**, and should: the retract-then-advance approach costs one
+backlash allowance of travel and is correct under either coupling, whereas
+trusting a retract is only correct under one. See `notes.md` for the
+measurements.
 
 This is why the unidirectional approach described below is not a refinement to
 reduce backlash by a few microns, it is the only thing that makes the axis
@@ -196,11 +210,11 @@ deterministic at all. It is also why the firmware tracks a "settled" flag
 separately from the step count, and reports position as `NaN` when a move was
 aborted part-way through a retract.
 
-**Fitting a preload spring would be a real improvement**, and would reduce the
-retract-then-advance sequence from a necessity to an optimisation. If the
-magnetic load on the stator reverses sign anywhere over the travel, a spring
-that is adequate at one end may not be at the other, so size it against the
-worst case.
+The 2026-08-17 rework is what moved the axis from the first case to the second,
+and this document does not yet describe it because the change has not been
+written down here. Whatever holds the stage to the spindle needs sizing against
+the worst case over the travel: if the magnetic load on the stator reverses
+sign anywhere, a preload adequate at one end may not be at the other.
 
 ### Couple to the thimble, not the ratchet
 
@@ -449,12 +463,15 @@ the claim should be measured rather than asserted.
   157 full steps per second, comfortably below the pull-in rate of a small
   stepper under load. Raising it much will need a ramp, which the PIO design
   accommodates but the firmware does not currently implement.
-- Aborting a move leaves up to eight microsteps queued in the PIO FIFO. The
-  firmware drains the FIFO before reporting a final position, so the count stays
-  exact, but the stage travels those few microns after the abort is issued.
-- The step counter leads reality by up to the FIFO depth during a move, since
-  it counts words queued rather than pulses emitted. This matters only for
-  telemetry read mid-move, and is under 4 µm.
+- Aborting a move leaves the queued pulses in flight. The firmware drains the
+  FIFO before reporting a final position, so the count stays exact, but the
+  stage travels those few microns after the abort is issued.
+- The step counter leads reality during a move, since it counts words queued
+  rather than pulses emitted. The lead is the eight-word joined FIFO plus the
+  OSR and the pulse in flight, **measured at 10 to 11 microsteps, 32 to 35 µm**,
+  on 2026-08-17 by differencing latched against settle-stepped crossings. This
+  matters for telemetry read mid-move and for any edge latched during an
+  ordinary move; homing settle-steps its approach and is unaffected.
 
 ## Where this code should eventually live
 
