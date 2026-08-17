@@ -40,17 +40,6 @@ pub static STATOR_HOME_ERROR: AtomicU32 = AtomicU32::new(0);
 /// of the datum the stage sits on, and with the datum near the middle of the
 /// travel that is genuinely useful rather than merely diagnostic.
 pub static STATOR_OPTO: AtomicU32 = AtomicU32::new(0);
-/// Step count at which the opto level last changed. Latched in the stepping
-/// path, so the edge is located to the step that crossed it rather than to
-/// whenever the host next asked. Meaningless until an edge has been seen, and
-/// during a move it leads the mechanism by the ten or eleven steps of FIFO
-/// measured on 2026-08-17.
-///
-/// Retained deliberately after the bring-up it was added for: until homing has
-/// been commissioned it is the only lost-step check available, and it is what
-/// the first home should be validated against. Once `stator_home_error` has
-/// been shown to work, this is a candidate for removal.
-pub static STATOR_OPTO_EDGE: AtomicU32 = AtomicU32::new(NAN_BITS);
 
 /// Completed moves, for wear and audit.
 pub static STATOR_MOVES: AtomicU32 = AtomicU32::new(0);
@@ -102,7 +91,6 @@ pub const EXTRA_PARAMS: &[ExtraParam] = &[
     ExtraParam::u32("stator_homed", &STATOR_HOMED),
     ExtraParam::f32("stator_home_error", &STATOR_HOME_ERROR),
     ExtraParam::u32("stator_opto", &STATOR_OPTO),
-    ExtraParam::f32("stator_opto_edge", &STATOR_OPTO_EDGE),
     ExtraParam::u32("stator_moves", &STATOR_MOVES),
     ExtraParam::u32_event("stator_faults", &STATOR_FAULTS),
 ];
