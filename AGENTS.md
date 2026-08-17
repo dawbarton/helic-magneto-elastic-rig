@@ -32,14 +32,10 @@ repository. If a platform change is needed urgently, a temporary
 the change lands upstream: a patched fork that outlives its reason is how this
 arrangement silently diverges from the platform.
 
-- `src/board.rs` owns only pins and unassembled peripheral parts.
-- `src/config.rs` owns compile-time choices, including `SAMPLE_RATE`,
-  `HARMONICS`, `TABLE_CAPACITY`, the output safety limits, the network
-  configuration and the active controller and programme.
-- `src/rig.rs` assembles core-1 hardware and implements `Rig`.
-- `src/telemetry.rs` declares atomic-backed read-only values.
-- `src/main.rs` binds interrupts, assigns cores, and composes the platform's
-  runners. It is auditable glue, not logic.
+`README.md` lists what each source file is for. Two of them are boundaries
+rather than descriptions, and are worth stating here: `src/board.rs` owns only
+pins and unassembled peripheral parts, and `src/main.rs` is auditable glue, not
+logic.
 
 ## Safety-critical constraints
 
@@ -76,22 +72,19 @@ there is never a rounding argument, only a units one:
 | Soft travel window | 3.175 to 18.034 | 0.125 to 0.710 |
 
 **The trap is writing a barrel reading straight into a millimetre parameter.**
-Every stator parameter that carries a position, `rig_stator_target`,
+Every stator parameter carrying a position, `rig_stator_target`,
 `rig_stator_jog` and `rig_stator_datum`, is in **millimetres**. A barrel reading
-of 0.418 written to `rig_stator_datum` is not a small error, it is a factor of
-25.4, and it is silent: 0.418 is an entirely plausible-looking millimetre value,
-it is inside the parameter's accepted range, and nothing downstream can tell it
-from a real one. Multiply by 25.4 on the way in, every time, and say which unit
-you mean in any note, commit message or comment.
+of 0.418 written to `rig_stator_datum` is wrong by a factor of 25.4 and silent
+with it: 0.418 is a plausible-looking millimetre value, it passes the
+parameter's range check, and nothing downstream can tell it from a real one.
+Multiply by 25.4 on the way in, and name the unit in any note, comment or
+commit message. Quoting both, as the table does, costs nothing.
 
-The same applies in reverse when reporting. Prefer quoting both, as the table
-above does, whenever a number is going to be read next to a barrel.
-
-Step counts are a third unit and are **full steps of 3.175 µm**, not
-microsteps, because MS1/MS2 are unstrapped and `STATOR_MICROSTEPS` is 1.0. The
-firmware's identifiers say "microstep" throughout, which stays correct if the
-carrier is ever strapped; recorded evidence must say full steps, or it silently
-changes meaning by a factor of eight on the day that happens.
+Step counts are a third unit: **full steps of 3.175 µm**, not microsteps,
+because MS1/MS2 are unstrapped and `STATOR_MICROSTEPS` is 1.0. The firmware's
+identifiers say "microstep" throughout, which stays correct if the carrier is
+ever strapped; recorded evidence must say full steps, or it changes meaning by
+a factor of eight on the day that happens.
 
 ### Using the axis
 
@@ -102,7 +95,8 @@ changes meaning by a factor of eight on the day that happens.
   across the datum and watch `stator_opto` go 1 to 0 and back. A sensor stuck
   reading "below the datum" is the one failure that can drive this axis into a
   hard stop, and this check takes a minute.
-  `data/stator-2026-08-17/commission_home.py --check` does it.
+  `data/stator-2026-08-17/commission_home.py --check` does it; `/data/` is
+  measurement results and harnesses, deliberately untracked.
 - **After a reflash the counter is zero and means nothing.** It is not a
   position until the axis is homed, however plausible it looks, and this has
   already caused one false fault report. The same applies to anything moved by
@@ -123,14 +117,11 @@ changes meaning by a factor of eight on the day that happens.
 - **Do not step during a capture.** The `stator` sample source makes any
   violation visible after the fact: a capture whose `stator` column is constant
   is quiescent by inspection.
-
-### Checking a session's work
-
-`stator_home_error` is the lost-step audit: re-home at the end of a session and
-it reports, in full steps, how far the datum turned out to be from where the
-counter predicted. Zero is the expected answer and what ten consecutive homes
-gave on 2026-08-17. Anything else means steps were lost, and the first thing to
-suspect is a rate that was raised.
+- **Re-home at the end of a session and read `stator_home_error`.** It reports,
+  in full steps, how far the datum turned out to be from where the counter
+  predicted. Zero is the expected answer, and what ten consecutive homes gave
+  on 2026-08-17. Anything else means steps were lost, and a raised rate is the
+  first thing to suspect.
 
 ## Platform constraints that still apply
 
@@ -149,34 +140,34 @@ suspect is a rate that was raised.
 
 ## Upgrading the platform
 
-The platform crates and the verification tools are pinned to one exact tag, in
-`Cargo.toml` and `.github/workflows/ci.yml` respectively. Pin a tag and never a
-branch: a git dependency cannot express a version range, and a moving pin
-removes the isolation this repository exists to provide. Upgrade both together,
-because a gate from a different platform version checks the wrong contract.
+Pin a tag and never a branch: a git dependency cannot express a version range,
+and a moving pin removes the isolation this repository exists to provide.
 
-The platform is at `0.x`, where the minor position is the breaking one:
+**The tag appears in three places and they must move together**, because a gate
+from a different platform version checks the wrong contract: `Cargo.toml`,
+`.github/workflows/ci.yml`, and the install line in `README.md`. On 2026-08-17
+the latter two were found three minor versions behind, having been missed by
+every upgrade since. **Grep the repository for the old tag** rather than
+editing the files you remember.
 
-| Bump | What to expect |
-|---|---|
-| Patch, `0.1.1` to `0.1.2` | No crate API change. Repin, run the full check set, done. |
-| Minor, `0.1.x` to `0.2.0` | Breaking. Expect to change code here. |
+The platform is at `0.x`, where the **minor** position is the breaking one:
+a changed signature, a new trait method without a default, a wire-visible name
+or semantic change, or a changed platform capacity. Read the tag message before
+every upgrade regardless, patch included, since it records what changed for
+consumers. Re-check the Embassy versions against the platform's
+`firmware/Cargo.toml` at the new tag: a mismatch presents as type errors on
+identically named types rather than as a version conflict.
 
-Breaking means a changed signature, a new trait method without a default, a
-wire-visible name or semantic change, or a changed platform capacity. Read the
-tag message before every upgrade regardless: it records what changed for
-consumers. Also re-check the Embassy versions against the platform's
-`firmware/Cargo.toml` at the new tag, since a mismatch presents as type errors
-on identically named types rather than as a version conflict.
+This rig's version is independent of the platform's. Do not sync them.
 
-This rig's version is independent of the platform's. Do not sync them. Build
-identity is rig-owned: the firmware reports this package's version with this
-repository's revision, and the platform version separately, which is what makes
-a flashed image identifiable.
+**Commit before flashing anything whose identity will be quoted as evidence.**
+The wire identity is built from `git rev-parse HEAD` and carries no dirty
+marker, so an image built from a modified tree reports a commit it was not
+built from. Raised upstream as
+[helic-daq#3](https://github.com/dawbarton/helic-daq/issues/3).
 
 The weekly `platform-drift` CI job builds against the platform's `main`. A
-failure there is advance warning about the next upgrade, not a defect in the
-pinned build.
+failure there is advance warning, not a defect in the pinned build.
 
 ## Working conventions
 
