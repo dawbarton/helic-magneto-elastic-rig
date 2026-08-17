@@ -117,10 +117,13 @@ change of analogue board, specimen, or exciter.
   absence of an acceleration ramp, so the fix is a ramp rather than a smaller
   increase. `MAX_STATOR_RATE_MM_S` still permits 3.0 and should not be trusted
   as a safe bound.
-- **The datum drifts about one full step per five minutes**, monotonically and
-  irreversibly, including while the axis is idle and de-energised (2026-08-17).
-  Whether the stage moves or the opto's trip point does is not yet separated.
-  Re-datum within a session if better than a few microns matters.
+- **The datum repeats to ±1 full step, 3.2 µm**, which is the opto sensor's own
+  resolution rather than an error that grows with use: 57 600 steps at
+  0.5 mm/s on 2026-08-17 lost none, and the crossing dithers between two
+  adjacent steps instead of marching. A drift of about a step per five minutes
+  seen earlier the same day stopped once the reworked coupling had been
+  exercised, and is read as bedding in; re-measure after the rig has stood
+  overnight, because its return would falsify that.
 - **Do not home until the datum geometry is measured.** A homing search is
   bounded by `STATOR_SEEK_MAX_MM`, currently 6.5 mm, so it can travel far
   outside any envelope that has been shown to be safe by hand. It also needs
@@ -1362,3 +1365,86 @@ Consequences:
   currently lets a host set a value that silently loses a step per sixty. Worth
   lowering to about 1.0 until an acceleration ramp exists. Not changed here:
   it is a hardware judgement, and the ramp is the real fix.
+
+## The residual step is dither, not lost steps, and the drift has stopped (2026-08-17)
+
+David's question about the entry above: is the single step of spread the opto
+sensor's resolution, or steps genuinely being lost? His discriminator was to
+run longer and see whether the error accumulates.
+
+That needs one modification before it separates anything. A longer run
+accumulates steps **and** elapsed time together, and the cooldown result had
+already shown the crossing moving while the axis was idle, so accumulation on
+its own cannot say which of the two is responsible. The runs are therefore
+blocks of equal wall-clock duration, about 100 s each, differing in what the
+axis does, rotated rather than blocked so a background drift cannot masquerade
+as an effect of any one condition:
+
+| Condition | Steps | Motor |
+|---|---|---|
+| `busy` | 14 400, at 0.5 mm/s | energised, warming |
+| `hold` | none | energised via `rig_stator_hold`, warming |
+| `idle` | none | de-energised, cooling |
+
+Both crossings are measured identically at every block boundary, costing about
+forty steps, so the measurement contributes equally to all three conditions.
+Four rotations: **57 600 full steps, 183 mm of travel, 19.8 minutes, zero
+faults.**
+
+### It is not lost steps
+
+The advancing crossing over the whole run stayed within one step, and the shift
+does not follow the stepping:
+
+| After a block of | Shifts | Net |
+|---|---|---|
+| `busy`, all 57 600 steps | 0, 0, 0, -1 | **-1** |
+| `hold` | 0, 0, +1, +1 | +2 |
+| `idle` | 0, 0, 0, 0 | **0** |
+
+The four `busy` blocks carried every one of the 57 600 steps and contributed
+nothing, once with the wrong sign. Had the axis been losing steps at the rate
+the earlier session's drift would imply, two steps per forty thousand, these
+blocks would have shown about three steps of monotone accumulation. They showed
+none.
+
+The `hold` total of +2 is not worth a mechanism. Three of twelve boundaries
+moved at all, and with a one-step quantiser and four observations per
+condition, that distribution is what dither looks like rather than an effect of
+holding current.
+
+### It is the sensor's resolution, and the earlier drift was bedding in
+
+The crossing sat at 160 for the first six boundaries, ten minutes and 28 800
+steps, then moved between 160 and 161 for the rest: 161, 161, 160, 161, 161.
+**Non-monotone**, dithering between two adjacent steps about a stable value.
+That is the signature of a threshold sitting between two step positions, which
+is exactly what "the resolution of the opto sensor" means, and it is the benign
+answer.
+
+Contrast the earlier runs, which moved 184 to 186 monotonically and did not
+come back over an eight-minute de-energised soak. That drift has stopped: zero
+net movement over the first ten minutes here, against a step per five minutes
+before. The best reading is that the reworked coupling was bedding in and has
+now settled, after some four thousand moves of exercise. It is a reading rather
+than a demonstration, since nothing was measured independently of the datum,
+but the change in behaviour is unambiguous.
+
+One incidental confirmation. Block 7 ended with the opto reading 1 where 0 was
+expected, and the harness flagged it. Every measurement parks the axis one step
+past the advancing crossing, which is to say **on the threshold**, so the level
+there is ambiguous by one step and occasionally reads the other way. That is
+the same dither seen from a different angle, and it argues for parking a few
+steps clear of the edge rather than one.
+
+### What this settles
+
+- **The step counter is faithful at 0.5 mm/s.** 57 600 steps with no
+  detectable loss, on top of the 40 000 of the earlier runs. Combined with the
+  rate sweep, the working rate is sound and the fault is entirely in raising it.
+- **The datum is repeatable to ±1 full step, 3.2 µm**, which is the sensor's
+  resolution and not an error budget that grows with use. Eight times inside
+  the 25.4 µm the design assumed.
+- **The drift is no longer a live concern**, but it is worth re-measuring after
+  the rig has been left overnight. If it returns after a period at rest, it is
+  not bedding in and the reading above is wrong.
