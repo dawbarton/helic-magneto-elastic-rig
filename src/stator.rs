@@ -426,12 +426,27 @@ impl StatorAxis {
         self.drain(slow).await;
 
         if let Some(predicted) = predicted {
-            // Lost-step audit: what the counter said the datum was, against
-            // where it actually is. Only meaningful well outside the datum's
-            // own repeatability.
-            let error = self.steps - predicted;
+            // Lost-step audit. The datum defines counter zero, so the counter's
+            // reading at the moment the datum is found back *is* the error
+            // accumulated since the last home: zero if nothing was lost.
+            //
+            // This used to subtract the position homing started from, which
+            // made it report the distance homing travelled rather than any
+            // error at all. Measured on hardware 2026-08-17: homing from
+            // counter +500 with nothing lost reported -500.
+            let _ = predicted;
+            let error = self.steps;
             STATOR_HOME_ERROR.store((error as f32).to_bits(), Ordering::Relaxed);
-            info!("stator: re-homed, {} microsteps from prediction", error);
+            info!("stator: re-homed, {} full steps from prediction", error);
+        }
+
+        // The counter is about to be re-zeroed on the datum, so carry the
+        // latched opto edge into the new frame with it. Left alone it keeps a
+        // value from a frame that no longer exists, and reads as an edge
+        // hundreds of steps from a datum it is sitting on.
+        let latched = f32::from_bits(STATOR_OPTO_EDGE.load(Ordering::Relaxed));
+        if latched.is_finite() {
+            STATOR_OPTO_EDGE.store((latched - self.steps as f32).to_bits(), Ordering::Relaxed);
         }
         self.steps = 0;
         self.homed = true;

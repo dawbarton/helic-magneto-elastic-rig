@@ -218,9 +218,16 @@ pub const STATOR_SEEK_MAX_MM: f32 = 8.0;
 /// [`STATOR_SEEK_MAX_MM`], because this is the only part of homing that
 /// advances blind and the upper hard stop has barely 0.13 mm of run-out.
 ///
-/// It must exceed the backoff plus the dead band, 0.2 + 0.06 mm, to reach the
-/// edge at all. At 0.4 mm it has three times the margin it needs and caps the
-/// net upward excursion of a homing sequence at 0.2 mm.
+/// It must exceed **the FIFO lead, plus the backoff, plus the dead band**,
+/// because the phase before it stops a FIFO lead past the retracting crossing
+/// and then retreats by the backoff. Measured on the first home, 2026-08-17:
+/// 11 + 63 + 20 = 94 full steps used of the 126 this allows, so the margin
+/// covers the dead band growing from 20 steps to about 52 before homing starts
+/// refusing. That refusal is informative rather than dangerous, and a dead
+/// band that has more than doubled is something to know about.
+///
+/// At 0.4 mm it also caps the net upward excursion of a homing sequence at
+/// 0.2 mm.
 ///
 /// The residual hazard, stated plainly: a sensor that fails reading "below the
 /// datum" skips the coarse phase, so homing advances the full 0.4 mm blind. If
