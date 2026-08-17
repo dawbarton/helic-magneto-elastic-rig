@@ -360,19 +360,43 @@ Determine which side the sensor changes on by hand, before the motor is
 coupled, and confirm `STATOR_OPTO_HIGH_BEYOND_DATUM` with a meter.
 
 **1. Confirm the microstepping strapping by inspection**, and set
-`STATOR_MICROSTEPS` to match. Do this before anything moves.
+`STATOR_MICROSTEPS` to match. Do this before anything moves. *Done on
+2026-08-17, and confirmed against the hardware rather than by inspection alone
+by step 2 below: the carrier is unstrapped and in full step, so the constant
+stays at 1.0 and the counter's unit is a full step of 3.175 µm.*
 
-**2. Steps per millimetre.** The pitch is known exactly, so what is really
-being verified is the steps-per-revolution assumption, the absence of gearing,
-and the absence of lost steps. Command exactly 4000 full steps, nominally
-12.7 mm, and read the barrel. Over that distance a ±5 µm manual reading is
-0.04%, so any discrepancy means lost steps or a wrong constant, not calibration
-error. Short moves cannot make this distinction, which is why the check is a
-long one. A factor of eight is the failure to look for first.
+**2. Steps per millimetre.** *Done on 2026-08-17, along with step 1.* The pitch
+is known exactly, so what is really being verified is the steps-per-revolution
+assumption, the absence of gearing, and the absence of lost steps.
 
-**3. Datum offset.** Home, then read the micrometer barrel manually and write
-that reading to `rig_stator_datum`. Update the compile-time default in
-`src/config.rs` to match, so it survives a reflash.
+The procedure originally written here commanded 4000 full steps, 12.7 mm, on
+the reasoning that a ±5 µm manual reading is only 0.04% of that distance. **Do
+not read two distances; read two graduation lines.** Command a whole number of
+barrel revolutions, which for 200 full steps per revolution is any multiple of
+200 steps, and check that the thimble returns to the identical graduation while
+the sleeve confirms the number of turns. That is a null measurement, so its
+precision is the angular precision of a thimble line rather than the ±5 µm of a
+distance estimate, and it needs a fraction of the travel. 800 steps sufficed,
+which matters when the travel limits are themselves unmeasured.
+
+A factor of eight is still the failure to look for first, and it shows up
+immediately: strapped microstepping gives an eighth of the expected travel, and
+a 0.9° motor gives half.
+
+**3. Datum offset.** *Done on 2026-08-17.* Read the micrometer barrel with the
+axis parked on the datum, and write the reading to `rig_stator_datum` and to
+the compile-time default in `src/config.rs`, so it survives a reflash.
+
+Two refinements from doing it. The barrel is unlikely to sit on a graduation
+when the axis is on the datum, so advance a step or two until it does and
+subtract that offset, which is exactly known. And the crossing dithers by a
+step, because the sensor's trip point sits between two step positions, so take
+the midpoint of the two counter values rather than whichever one turns up.
+
+This step can be done before homing, from a settle-stepped advancing crossing,
+which is the same quantity homing latches. That is what was done here, since
+homing is still blocked on step 0. Treat the result as provisional until a real
+home agrees with it.
 
 **4. Datum repeatability.** Home ten times and record the spread in
 `stator_steps`. Expect around 64 microsteps, matching the 1/1000 inch figure

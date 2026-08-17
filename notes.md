@@ -92,12 +92,14 @@ change of analogue board, specimen, or exciter.
   wired and first driven on 2026-08-14, two jogs of one revolution, and the
   firmware emitted exactly the steps it should. The direction convention and
   the opto polarity are now measured, and since the mechanical rework of
-  2026-08-17 the stage follows a retraction with a 19-microstep reversal dead
-  band and a datum edge repeatable to under one microstep. Everything else
-  about it is still an assumption: the fitted motor is unidentified, so 200
-  full steps per revolution and direct coupling to the barrel are guesses; the
-  datum geometry is unconfirmed, and the two constants describing it
-  contradict the measured opto polarity; and the axis has never been homed. `docs/stator-stage.md` holds the commissioning
+  2026-08-17 the stage follows a retraction with a 19-full-step reversal dead
+  band and a datum edge repeatable to about one full step. The steps per
+  millimetre, the absence of gearing, the microstepping constant and the datum
+  reading were calibrated against the barrel the same day. What remains
+  unmeasured is the **datum geometry**: which extreme of travel the datum sits
+  at, and the clearance between it and the hard stop. The two constants
+  describing that geometry contradict the measured opto polarity, and the axis
+  has never been homed. `docs/stator-stage.md` holds the commissioning
   procedure, and none of it beyond first motion has been done.
 - **Microstepping is not strapped**, so `STATOR_MICROSTEPS` stays at 1.0 and
   the driver is in full step, 3.175 µm per step. Every step count recorded in
@@ -1448,3 +1450,71 @@ steps clear of the edge rather than one.
 - **The drift is no longer a live concern**, but it is worth re-measuring after
   the rig has been left overnight. If it returns after a period at rest, it is
   not bedding in and the reading above is wrong.
+
+## Steps per millimetre and the datum, calibrated against the barrel (2026-08-17)
+
+The three assumptions the axis was built on are now measurements. David read the
+micrometer at both ends of a commanded leg, with the axis held still and
+de-energised for each reading.
+
+### The leg
+
+The axis was parked on the settle-stepped advancing crossing, then advanced two
+steps so the barrel sat on a graduation line, and read. It was then moved 800
+full steps down and read again, and returned and read a third time. Both ends
+were approached by an advance, the second via the standard 0.25 mm backlash
+take-up, so every reading is in the same contact state.
+
+| Counter | Barrel | |
+|---|---|---|
+| 163 | 0.418 inch, on the line | start |
+| -637 | **0.318 inch, exactly on the line** | 800 steps down |
+| 163 | **0.418 inch, back on the line** | closure |
+
+**800 full steps = 0.100 inch = 2.540 mm exactly, so 3.175 um per full step**,
+which is the value the firmware has assumed all along.
+
+Landing on a graduation at both ends matters more than the two absolute
+readings do. It is a null measurement: it says the 800 steps produced a whole
+number of turns, and the sleeve says that number was four. The angular
+precision of a thimble line is well under a division, so this pins the
+steps-per-revolution far tighter than reading two distances a division apart
+could.
+
+What that settles, all previously flagged as assumptions:
+
+- `STATOR_FULL_STEPS_PER_REV = 200` is **confirmed**. A 0.9 degree motor would
+  have moved 0.368 inch.
+- **Direct coupling, no gearing or belt reduction**, is confirmed by the same
+  measurement.
+- `STATOR_MICROSTEPS = 1.0` is **confirmed against the hardware** rather than
+  against the MS1/MS2 strapping by inspection. Strapped 1/8 microstepping would
+  have moved 0.406 inch.
+- **No steps lost over the 1600-step round trip**, by barrel and by counter
+  together, which agrees with the electrical evidence from the same day.
+
+### The datum
+
+The advancing crossing dithers between counter 160 and 161, as established
+earlier, so the sensor's trip point lies between two step positions rather than
+on one. Taking the midpoint, the datum edge is 2.5 full steps below the 163 at
+which 0.418 inch was read. One full step is exactly 0.000125 inch, from the
+calibration above, so:
+
+**Datum = 0.418 - 0.0003125 = 0.4176875 inch = 10.609 mm.**
+
+Now written to `rig_stator_datum` at runtime and to `STATOR_DATUM_MM` in
+`src/config.rs`, since the runtime value does not survive a reflash.
+
+Two things to record with it, neither a defect:
+
+- **The uncertainty is ±13 um**, half a thousandth-inch division, and it is now
+  the dominant term in absolute position. The axis's own datum repeatability is
+  3.2 um, so the barrel reading is four times worse than the mechanism. That is
+  the expected asymmetry, not a problem: relative moves are what the experiment
+  uses, and they keep the 3.2 um figure.
+- **This datum was not produced by homing.** It comes from a settle-stepped
+  advancing crossing, which is the same approach homing uses and the same
+  quantity it latches, but homing has still never been run and the datum
+  geometry is still unmeasured. If the first home disagrees with 10.609 mm by
+  much more than 13 um, believe the home and suspect the geometry.

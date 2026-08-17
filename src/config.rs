@@ -74,8 +74,12 @@ pub const MICROMETER_PITCH_MM: f32 = 25.4 / 40.0;
 /// Full steps per motor revolution, and any reduction between motor and
 /// barrel folded in. 200 is the standard 1.8 degree two-phase stepper.
 ///
-/// The fitted motor has not been identified, so this is an assumption until
-/// the steps-per-millimetre check at commissioning confirms it.
+/// **Measured on 2026-08-17**, not assumed: 800 commanded full steps moved the
+/// barrel 0.100 inch exactly, four whole turns landing back on the same
+/// graduation, and the return leg closed on the same line. That confirms 200
+/// steps per revolution, direct coupling with no gearing, and
+/// `STATOR_MICROSTEPS` at 1.0 all at once, since a 0.9 degree motor would have
+/// given half the travel and strapped microstepping an eighth of it.
 pub const STATOR_FULL_STEPS_PER_REV: f32 = 200.0;
 
 /// Microsteps per full step, set by the MS1/MS2 strapping at the driver.
@@ -87,6 +91,10 @@ pub const STATOR_FULL_STEPS_PER_REV: f32 = 200.0;
 /// with this same constant. It therefore stays at 1.0, matching an unmodified
 /// MP6500 carrier (both MS pins are pulled low internally), and is raised to
 /// 8.0 only once MS1/MS2 are confirmed strapped high by inspection.
+///
+/// The 1.0 was confirmed against the hardware on 2026-08-17 by the barrel
+/// measurement described on `STATOR_FULL_STEPS_PER_REV`, so the counter's unit
+/// is currently a full step of 3.175 um despite the name used throughout.
 pub const STATOR_MICROSTEPS: f32 = 1.0;
 
 /// True when advancing the spindle increases the micrometer's barrel reading.
@@ -257,10 +265,21 @@ pub const MAX_STATOR_BACKLASH_MM: f32 = 2.0;
 pub const STATOR_DWELL_S: f32 = 0.0;
 pub const MAX_STATOR_DWELL_S: f32 = 30.0;
 
-/// Barrel reading at the opto datum, in mm. Zero until measured by hand at
-/// commissioning; `rig_stator_datum` overrides it at runtime, and like
-/// `LASER_RANGE_MM` that override is not persisted across a reflash.
-pub const STATOR_DATUM_MM: f32 = 0.0;
+/// Barrel reading at the opto datum, in mm. `rig_stator_datum` overrides it at
+/// runtime, and like `LASER_RANGE_MM` that override is not persisted across a
+/// reflash, which is why the measured value lives here too.
+///
+/// Measured 2026-08-17: 0.4176875 inch, from a barrel reading of 0.418 inch
+/// taken with the counter parked 2.5 full steps above the datum edge. The
+/// half step is not spurious precision: the sensor's trip point sits between
+/// two step positions, so the advancing crossing dithers between counter 160
+/// and 161, and the midpoint is the value homing will produce on average.
+///
+/// The uncertainty is **±13 um**, half a thousandth-inch division on the
+/// barrel, which is four times the axis's own 3.2 um repeatability. It bounds
+/// absolute accuracy only; relative moves stay far better, and this constant
+/// affects nothing until the axis is homed.
+pub const STATOR_DATUM_MM: f32 = 10.609;
 
 /// Hold current between moves by default. Zero de-energises, which is the
 /// quieter state for a rig measuring a sense coil at the microvolt level, and
