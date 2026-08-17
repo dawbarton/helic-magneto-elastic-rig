@@ -337,27 +337,40 @@ impl StatorAxis {
     /// Find the datum and zero the step counter there.
     ///
     /// The datum is always latched **during an advance**, because that is the
-    /// motion that positions the stage against the spindle. Since the datum
-    /// sits near the middle of the travel rather than at an extreme, that makes
-    /// the sequence a single shape with no geometry cases:
+    /// motion that positions the stage against the spindle. The datum sits near
+    /// the middle of the travel rather than at an extreme, so there are no
+    /// geometry cases, but the stage can start on either side of it:
     ///
-    /// 1. if the stage is above the datum, retract until it is below;
-    /// 2. retract a further `STATOR_HOME_BACKOFF_MM`, clearing the reversal
+    /// 1. if the stage is below the datum, seek up until it is above;
+    /// 2. come back down through the edge;
+    /// 3. retract a further `STATOR_HOME_BACKOFF_MM`, clearing the reversal
     ///    dead band so the flag genuinely moves;
-    /// 3. advance slowly onto the edge and stop there.
+    /// 4. advance slowly onto the edge and stop there.
     ///
-    /// The two searches are bounded very differently, and deliberately.
-    /// Step 1 retracts, which is the safe direction to overshoot in: the lower
-    /// stop has 0.635 mm of run-out and sits 7.4 mm beyond the datum, so it
-    /// gets the full `STATOR_SEEK_MAX_MM`. Step 3 advances blind toward an
-    /// upper stop with barely 0.13 mm of run-out, so it gets
-    /// `STATOR_APPROACH_MAX_MM`, which is a fifth of that and only just more
-    /// than the backoff it has to undo.
+    /// Phases 1 and 2 exist so that phase 4 always starts a known backoff below
+    /// the edge, whatever the stage's starting position. Without phase 1 a
+    /// stage starting well below the datum would be out of reach of phase 4's
+    /// bound and homing would fault rather than work.
     ///
-    /// Every step of both searches waits for its pulse to be executed, so the
-    /// sensor is read in step with the mechanism rather than the ten or eleven
-    /// steps of FIFO ahead of it. That matters here: read ahead, the overshoot
-    /// would be ten times the datum's own repeatability.
+    /// **The bounds differ by twenty to one, deliberately.** Phases 1 and 2 may
+    /// have to cross the whole travel, so they carry `STATOR_SEEK_MAX_MM`; they
+    /// run coarse and fast, since the FIFO lead is irrelevant when phase 3 then
+    /// backs off sixty steps. Phase 4 is the only motion whose length is known
+    /// in advance, so it carries `STATOR_APPROACH_MAX_MM`, and it settle-steps:
+    /// the counter leads the mechanism by ten or eleven queued steps, which is
+    /// ten times the datum's own repeatability, so reading the sensor ahead of
+    /// the mechanism would throw away the precision this phase exists to buy.
+    ///
+    /// **The residual hazard is a sensor stuck reporting "below the datum".**
+    /// Phase 1 would then advance its full bound with nothing to stop it, and
+    /// from just under the datum that reaches past the upper hard stop. Every
+    /// other failure mode faults safely, because every other phase either
+    /// retracts, toward 0.635 mm of run-out, or is bounded far shorter than the
+    /// distance to a stop. No bound can remove this one: seeking upward is how
+    /// the datum is found from below. The current-limit potentiometer is what
+    /// makes it a stall rather than damage, and confirming the sensor
+    /// **changes state** by hand before the first home of a session is the
+    /// cheap check that catches it; see `docs/stator-stage.md`.
     async fn home(&mut self) -> Result<(), Abort> {
         self.set_state(StatorState::Homing);
 
@@ -372,21 +385,37 @@ impl StatorAxis {
         self.settled = false;
         self.publish();
 
-        // 1. Get below the datum, retracting, which is the direction with room
-        //    to spare. Skipped when the sensor already reports below.
-        if !self.below_datum() {
-            self.set_direction(false, fast).await?;
-            if !self.step_until_below(true, false, slow, seek, true).await? {
-                return self.lost("stator: homing found no datum edge on the way down");
+        // 1. If the stage starts below the datum, seek up to it. Only this
+        //    phase can need the full travel, and it is skipped whenever the
+        //    stage is already above the datum. Coarse: the FIFO lead does not
+        //    matter when phase 3 backs off sixty steps afterwards.
+        if self.below_datum() {
+            self.set_direction(true, fast).await?;
+            if !self
+                .step_until_below(false, true, fast, seek, false)
+                .await?
+            {
+                return self.lost("stator: homing found no datum edge on the way up");
             }
         }
 
-        // 2. Stand clear of the edge by more than the reversal dead band.
+        // 2. Come back down through the edge. Retracting is the direction with
+        //    room to spare, so this carries the full search bound too.
         self.set_direction(false, fast).await?;
+        if !self
+            .step_until_below(true, false, fast, seek, false)
+            .await?
+        {
+            return self.lost("stator: homing found no datum edge on the way down");
+        }
+
+        // 3. Stand clear of the edge by more than the reversal dead band, so
+        //    the final approach starts from the same small standoff every time
+        //    however far away the stage began.
         self.step_fixed(backoff, false, fast).await?;
 
-        // 3. Advance onto the edge. This is the only blind advance homing
-        //    makes, hence the much tighter bound.
+        // 4. Advance onto the edge, slowly and in lockstep with the mechanism.
+        //    Bounded tightly: by now the edge is known to be a backoff away.
         self.set_direction(true, slow).await?;
         if !self
             .step_until_below(false, true, slow, approach, true)
