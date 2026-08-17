@@ -1704,3 +1704,74 @@ All six software gates pass: `cargo fmt --check`, `clippy -D warnings`, both
 board builds, `helic-deps-check`, and `helic-rt-layout`. **Not flashed**, so
 none of this is hardware-verified: the rig is still running `0.1.0 9be46f2`,
 which predates every change in this entry.
+
+## Platform v0.2.4, flashed, and a homing bug caught before it ran (2026-08-17)
+
+Repinned from v0.2.3 to v0.2.4 and flashed. Patch bump: the only consumer
+change is `DualSsiReader` sampling one PIO cycle into the clock-high phase, a
+fix for an RLS RMB20/AM4096 encoder. This rig does not use that codepath at
+all, reading an AD7609, driving an AD5064, and generating steps from its own
+PIO program, so David's expectation that the change was inert here is correct.
+No crate API or wire-protocol change, and the Embassy versions are unchanged
+from v0.2.3, checked against the platform's `firmware/Cargo.toml` at the tag.
+
+**Two of the three pins had drifted.** The crates were at v0.2.3, but
+`.github/workflows/ci.yml` and the README install line still said **v0.1.3**.
+So since the v0.2.0 upgrade, CI had been installing host verification gates
+three minor versions behind the firmware they check, which is exactly the
+failure `AGENTS.md` warns about and it arrived silently. All three now say
+v0.2.4. Worth a habit: grep the whole repository for the old tag when
+upgrading, not just `Cargo.toml`.
+
+### A homing bug, found by reading rather than by running
+
+The homing rewritten earlier the same day was wrong for the case where the
+stage starts **below** the datum, which is half the travel. It skipped the seek
+phase and left the final approach, deliberately bounded at 0.4 mm, to cover a
+gap of up to 7.4 mm. Homing would have faulted rather than worked. It fails
+safe, so this was a correctness bug rather than a hazard, but it would have
+been the first thing the first home did.
+
+Homing now seeks **up** through the edge when it starts below it, comes back
+down through it, backs off, and makes the tight final approach. The approach
+therefore always begins one backoff below the edge whatever the starting
+position, which is also what makes the datum repeatable from anywhere. The two
+coarse phases run at 0.5 mm/s without settle-stepping, since the ten-step FIFO
+lead is irrelevant before a sixty-three-step backoff; only the final approach
+settle-steps, at 0.1 mm/s.
+
+The residual hazard moved with the fix and is documented on the function: a
+sensor stuck reading "below the datum" makes the upward seek run its full 8 mm
+bound, which from just under the datum reaches past the upper stop. Every other
+failure mode either retracts, toward 0.635 mm of run-out, or is bounded far
+shorter than the distance to a stop. This is why the commissioning procedure
+starts by confirming the sensor **changes state**.
+
+### Build identity does not mark a dirty tree
+
+Noticed while flashing: the first flash reported `0.1.0 ff55589`, a clean
+commit hash, from a working tree that carried the repin and the homing fix
+uncommitted. The platform's `emit_identity` builds `HELIC_GIT_DESCRIBE` with
+`git describe --always --dirty`, but the wire identity, which is what
+`helic-daq status` reports and what `AGENTS.md` calls "what makes a flashed
+image identifiable", comes from `git rev-parse --short=7 HEAD` and carries no
+dirty marker. A modified tree therefore flashes an image that names a commit it
+is not built from.
+
+Committed and reflashed so the identity is true, but the gap is a platform one
+and worth raising upstream: the wire identity should carry the dirty marker, or
+refuse to build. Until then, **commit before flashing** anything whose identity
+is going to be quoted as evidence.
+
+### Verified after the flash
+
+`firmware: 0.1.0 4f782a4`, 59 parameters where there were 60, since
+`rig_stator_dwell` is gone, and `rig_stator_datum` comes up at 10.609 mm from
+the new compile-time default rather than needing a runtime write.
+
+All six software gates, and the full default `helic-rt-regression` with no
+probe attached: no acceptance errors, `loop_time_max` 45 us against the 60 us
+limit, 8000 records, no lost packets, no index gaps, no dropped records, jitter
+0, wake phase 36/36.
+
+**Homing itself is still unexercised.** Nothing above ran it.
