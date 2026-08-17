@@ -1835,3 +1835,58 @@ one failure mode that can drive this axis into the upper stop. The level is
 currently stuck the other way, reading "above the datum", which would fault
 safely on the downward seek rather than run away, but that is not a reason to
 try it.
+
+## Correction: there was no fault, and the axis validated end to end (2026-08-17)
+
+The entry above is **retracted**. There is nothing wrong with the sensor, the
+drive, or the coupling. David had moved the stage by hand while finding the
+travel limits, so the counter's zero, set by the reflash, corresponded to an
+unknown barrel position rather than to the datum edge where the previous image
+had parked it. Every reading was truthful; my premise was wrong.
+
+The opto reading 0 at a hand-set 0.515 inch is exactly correct: that is above
+the datum at 0.4177, and above the datum reads low. It had been telling the
+truth throughout, and the sensor being stuck at the *low* level was the clue I
+under-weighted, having already reasoned that the pull-up makes a disconnected
+sensor read high.
+
+**The lesson is about the counter, not the sensor.** After a reflash the step
+counter is zero and the axis is unhomed, so the counter carries no information
+about where the stage is. It is easy to keep treating it as though it does,
+because it reads plausibly and the last known position is fresh in mind. Anything
+moved by hand, and anything at all across a reflash, needs the barrel or the
+opto to re-establish position before a step count means anything.
+
+### What the false alarm turned into: a clean end-to-end validation
+
+Given the barrel at 0.515 inch and the datum at 0.4176875, the datum should lie
+(0.515 - 0.4176875) / 0.000125 = **779 full steps** below, with the retracting
+crossing about 19 steps further on. Retracted in 50-step blocks, the opto
+crossed at **800 steps**, and correcting for the 10 to 11 step FIFO lead of a
+coarse move puts the true crossing at about 789 against 798 predicted.
+
+Settle-stepped immediately afterwards, the crossings came out at:
+
+| Quantity | Value |
+|---|---|
+| Advancing crossing | counter -1418 |
+| Retracting crossing | counter -1438 |
+| Dead band | **20 full steps**, matching the 19 to 20 measured this morning |
+| Datum below the 0.515 inch reading | **778 steps**, against 779 predicted |
+
+So an independent hand reading of the barrel and a datum measured hours earlier
+agree to **one full step, 3.2 um**. That exercises the whole chain at once: the
+datum value, the steps-per-inch calibration, the dead band, the sensor, the
+drive and the coupling. It is a better check than the one I was trying to run
+when it failed.
+
+### Commissioning step 1 passed
+
+The sensor changes state in both directions, 1 to 0 advancing and 0 to 1
+retracting, on the flashed image `4f782a4`. That eliminates the one failure mode
+that can drive this axis into the upper stop, a sensor stuck reading "below the
+datum" with nothing to terminate homing's upward seek.
+
+The stage is parked 100 full steps below the datum edge, so the first home's
+upward seek has 0.32 mm to run against its 8 mm bound. Homing has still not been
+run.
