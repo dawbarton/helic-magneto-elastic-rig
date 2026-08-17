@@ -126,6 +126,26 @@ change of analogue board, specimen, or exciter.
   seen earlier the same day stopped once the reworked coupling had been
   exercised, and is read as bedding in; re-measure after the rig has stood
   overnight, because its return would falsify that.
+- **Keep the barrel between 0.2 and 0.725 inch** (David, 2026-08-17). In the
+  units the axis uses, with the datum at 0.4176875 inch and one full step
+  exactly 0.000125 inch:
+
+  | Bound | Barrel | From the datum | Counter, this power-up |
+  |---|---|---|---|
+  | Lower | 0.2 inch, 5.08 mm | -1741 steps, -5.53 mm | -1581 |
+  | Datum | 0.4176875 inch, 10.609 mm | 0 | 160.5 |
+  | Upper | 0.725 inch, 18.415 mm | +2458 steps, +7.81 mm | +2619 |
+
+  The upper bound is the interesting one and may be raised later. **Nothing in
+  the firmware enforces this.** The soft travel window applies only once homed,
+  and before homing the only bound is `STATOR_SEEK_MAX_MM` on a single jog, so
+  repeated jogs can walk anywhere. Until the axis is homed the envelope is the
+  operator's discipline, and it belongs in any host script that drives the axis.
+- **The datum is not at an extreme of travel**, which the firmware's travel
+  model assumes it is. The envelope above puts 5.5 mm of sanctioned travel
+  below the datum and 7.8 mm above it, so `STATOR_DATUM_CLEARANCE_MM` at 0.5 mm
+  describes a short run-out to a hard stop that is not there on either side.
+  See the entry below on what homing needs.
 - **Do not home until the datum geometry is measured.** A homing search is
   bounded by `STATOR_SEEK_MAX_MM`, currently 6.5 mm, so it can travel far
   outside any envelope that has been shown to be safe by hand. It also needs
@@ -1508,13 +1528,87 @@ Now written to `rig_stator_datum` at runtime and to `STATOR_DATUM_MM` in
 
 Two things to record with it, neither a defect:
 
-- **The uncertainty is ±13 um**, half a thousandth-inch division, and it is now
-  the dominant term in absolute position. The axis's own datum repeatability is
-  3.2 um, so the barrel reading is four times worse than the mechanism. That is
-  the expected asymmetry, not a problem: relative moves are what the experiment
-  uses, and they keep the 3.2 um figure.
+- **The uncertainty is about one full step, 3.2 um.** An earlier draft of this
+  entry said ±13 um, half a barrel division, and David corrected it. Nothing
+  was interpolated between graduations: the axis was stepped until the barrel
+  coincided with a line, so the reading is a null measurement whose precision
+  is how well coincidence can be judged, and the exactly known two-step offset
+  then carries it back to the datum. The residual is the half-step dither of
+  the trip point, not the division width. This is the same trick as the
+  calibration leg, and it is worth remembering as the general method: **move
+  the axis onto the graduation rather than estimating between graduations.**
+- **The absolute accuracy of the barrel does not enter.** Nothing depends on
+  it. The datum fixes an origin, and every quantity the experiment uses is a
+  relative move from that origin.
 - **This datum was not produced by homing.** It comes from a settle-stepped
   advancing crossing, which is the same approach homing uses and the same
   quantity it latches, but homing has still never been run and the datum
   geometry is still unmeasured. If the first home disagrees with 10.609 mm by
   much more than 13 um, believe the home and suspect the geometry.
+
+## Homing is implemented, and what now blocks it is the travel model (2026-08-17)
+
+Homing exists in full. `home()` in `src/stator.rs`, reached by writing any
+non-zero value to `rig_stator_home`, and described in `docs/stator-stage.md`.
+It has never been run on this rig. Nothing in the platform is involved: the
+whole axis is rig-specific, and only `src/step_pio.rs`, the pulse generator, is
+portable enough to belong upstream one day.
+
+What it does, in order: refuse outright if the geometry is the awkward one and
+the backoff will not fit the clearance; leave the clearance if it started in
+one, moving away from the hard stop; stand off by `STATOR_HOME_BACKOFF_MM`;
+approach the edge at `STATOR_HOME_SLOW_MM_S`, stepping one at a time and
+waiting for each pulse so the sensor is read in step with the mechanism rather
+than a FIFO ahead of it; and, in the geometry where that approach was a
+retract, retreat and come back out advancing so the crossing that defines the
+datum is made under contact. Every search is bounded by `STATOR_SEEK_MAX_MM`
+and a search that runs past it faults rather than continuing into a stop. It
+then zeroes the counter and, on a re-home, publishes `stator_home_error`, the
+lost-step audit.
+
+The mechanical objection is gone. Homing's back-off-and-reapproach was inert
+before the coupling rework, because a retraction moved nothing; the backoff of
+0.2 mm is now 63 full steps against a measured dead band of 19 to 20, so it
+moves the flag properly.
+
+**What blocks it now is that the travel model does not match the rig.** The
+firmware assumes the datum sits at one extreme of travel with a hard stop just
+past it, and derives a one-sided soft window from that:
+
+| Constant | Value | What it asserts |
+|---|---|---|
+| `STATOR_DATUM_AT_ADVANCED_EXTREME` | `true` | the datum is at the advanced end |
+| `STATOR_DATUM_CLEARANCE_MM` | 0.5 | a hard stop 0.5 mm above the datum |
+| `STATOR_TRAVEL_RANGE_MM` | 5.0 | all working travel lies below the datum |
+| `STATOR_OPTO_HIGH_BEYOND_DATUM` | `true` | the opto reads high above the datum |
+
+Three of those four are contradicted by measurement. The opto reads **low**
+above the datum, on every crossing since 2026-08-14, so the last row is wrong
+as written; `travel_window()` currently yields -1575 to 0 steps, permitting no
+travel at all above the datum, while the sanctioned envelope allows +2458; and
+a hard stop 0.5 mm above the datum cannot be reconciled with an envelope that
+goes 7.8 mm above it.
+
+The honest conclusion is that **the datum is somewhere in the middle of the
+travel, not at an extreme**, which is a case the design did not contemplate. It
+is a benign case, being the one with a hard stop nowhere near, but the code
+expresses it badly: `beyond_datum()` is documented as "in the short clearance
+between the edge and the hard stop" when it now only means "on the advanced
+side", and the refusal that protects the awkward geometry guards a hazard that
+may not exist.
+
+So this is a firmware change rather than a measurement, and it should not be
+made by guessing which of the two booleans to flip. What is needed first:
+
+1. **Where are the hard stops?** Both of them, by hand, with the motor
+   uncoupled, in barrel readings. That is the measurement the envelope is
+   standing in for.
+2. **Then decide the travel model.** If the datum really is mid-travel, the
+   window wants to become genuinely two-sided, with a signed range either side
+   of the datum, and the clearance concept drops out. That is a small change to
+   `travel_window()` and the four constants above, and it makes homing's
+   two-geometry branch mostly redundant, since the approach can always be an
+   advance from below.
+
+Until then homing stays unrun, and the envelope stays the operator's
+responsibility.

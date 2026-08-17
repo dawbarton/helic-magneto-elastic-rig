@@ -275,10 +275,16 @@ pub const MAX_STATOR_DWELL_S: f32 = 30.0;
 /// two step positions, so the advancing crossing dithers between counter 160
 /// and 161, and the midpoint is the value homing will produce on average.
 ///
-/// The uncertainty is **±13 um**, half a thousandth-inch division on the
-/// barrel, which is four times the axis's own 3.2 um repeatability. It bounds
-/// absolute accuracy only; relative moves stay far better, and this constant
-/// affects nothing until the axis is homed.
+/// The uncertainty is about **one full step, 3.2 um**, not the half-division
+/// a barrel reading would normally carry. Nothing was interpolated between
+/// graduations: the axis was stepped until the barrel coincided with a line,
+/// which makes it a null reading whose precision is how well coincidence can
+/// be seen, and the exactly known step offset then carries it back to the
+/// datum. The residual is the half-step dither of the trip point.
+///
+/// The *absolute* accuracy of the barrel does not enter, because nothing
+/// depends on it. This constant only fixes an origin; every quantity the
+/// experiment uses is a relative move from the datum.
 pub const STATOR_DATUM_MM: f32 = 10.609;
 
 /// Hold current between moves by default. Zero de-energises, which is the
