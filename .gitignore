@@ -1,1 +1,6 @@
 /target
+
+# Hardware measurement results. Not build artefacts: they cannot be
+# regenerated from a fresh clone, since the input is the rig. Kept out of
+# version control as a deliberate open question rather than as rubbish.
+/data/
