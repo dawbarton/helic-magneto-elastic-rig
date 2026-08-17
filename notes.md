@@ -1890,3 +1890,84 @@ datum" with nothing to terminate homing's upward seek.
 The stage is parked 100 full steps below the datum edge, so the first home's
 upward seek has 0.32 mm to run against its 8 mm bound. Homing has still not been
 run.
+
+## Homing commissioned: ten homes, zero error, zero faults (2026-08-17)
+
+The axis has been homed. Commissioning steps 3 to 7 of `docs/stator-stage.md`
+are done, on firmware `ef798b2`.
+
+### The first home, and what its trace showed
+
+From 100 full steps below the datum edge, the four phases behaved exactly as
+designed. Read off the counter trace:
+
+| Phase | Counter | Note |
+|---|---|---|
+| 1, seek up | -1518 to -1408 | crossed the edge, stopping 10 steps past the settle-stepped crossing at -1418, which is the FIFO lead on a coarse move |
+| 2, come back down | to about -1448 | crossed back, again a FIFO lead past |
+| 3, back off | to -1511 | 63 full steps, as configured |
+| 4, slow approach | -1511 to -1418 | 93 single settle-stepped advances, then the counter zeroed |
+
+**Phase 4 used 93 full steps of the 126 its bound allows.** That is the real
+constraint on `STATOR_APPROACH_MAX_MM` and it is now recorded on the constant:
+the approach has to cover the FIFO lead, plus the backoff, plus the dead band,
+11 + 63 + 20. The remaining margin covers the dead band roughly doubling before
+homing starts refusing, and that refusal is informative rather than dangerous.
+
+### Two bugs the commissioning found
+
+**`stator_home_error` was not measuring an error.** It subtracted the position
+homing started from, so it reported the distance homing travelled. Tested on
+hardware before the fix: homing from counter +500 with nothing lost reported
+**-500**. The datum defines counter zero, so the counter's reading when the
+datum is found back is itself the accumulated error, and that is what it stores
+now. The exactness of that -500 is incidentally the evidence that nothing was
+lost over the excursion.
+
+**`stator_opto_edge` kept a stale frame.** The latch held the value recorded
+before `home()` re-zeroed the counter, so after the first home it read -1418: an
+edge more than four millimetres from a datum it was sitting on. It is now
+carried into the new frame with the counter and reads about zero after a home,
+which makes it a usable check that the approach landed where the settle-stepped
+measurement did.
+
+Both were only findable by running the thing. Neither would have shown up in any
+software gate.
+
+### Ten homes
+
+Alternating the starting side so both paths through `home()` are exercised: from
+300 steps **below** the datum, which runs the upward seek, and from 700 steps
+**above** it, which skips the seek and takes the long retract instead.
+
+| Quantity | Result |
+|---|---|
+| Homes | 10, plus the first |
+| `stator_home_error` | **0.0 on every one**, spread 0, sd 0 |
+| `stator_opto_edge` after each | **0.0 on every one** |
+| `stator_faults` | 0 |
+| Both homing paths | exercised, five each |
+
+So: **no lost steps at all** across ten excursions of 300 to 700 full steps, and
+a datum repeatability of **zero full steps**, which bounds it below one step,
+3.175 um. The design budgeted 25.4 um and the audit's noise floor was assumed to
+be 64 full steps; the real figures are at least eight and sixty-four times
+better respectively.
+
+Worth noting against this morning: the advancing crossing dithered between two
+adjacent steps then, and did not dither at all here. `stator_home_error` is
+sensitive to exactly that, since each home re-zeroes on the crossing it finds,
+so ten identical zeroes is a real result rather than a blind spot. The likely
+reason is that homing's approach is fixed, always the same rate and the same
+standoff, where this morning's crossings were taken at a mix of rates and
+approaches.
+
+### State
+
+`stator_position_mm` reads 10.6090 mm, 0.41768 inch, against the datum measured
+by hand this morning. `loop_time_max` 44 us against the 60 us limit, no
+overruns, no new dropped records.
+
+Still outstanding: **the barrel has not been read by eye since homing.** That is
+the one check that does not go through the same sensor, and it is what would
+catch the datum being self-consistently wrong.
