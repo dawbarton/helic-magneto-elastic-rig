@@ -1775,3 +1775,63 @@ limit, 8000 records, no lost packets, no index gaps, no dropped records, jitter
 0, wake phase 36/36.
 
 **Homing itself is still unexercised.** Nothing above ran it.
+
+## Unresolved: the opto stopped responding to motion after the reflash (2026-08-17)
+
+**Homing was not run.** Step 1 of the commissioning procedure, proving the
+sensor changes state, failed, which is the check that exists to stop exactly
+this becoming a crash.
+
+After flashing `4f782a4` the stage sat physically on the datum edge, where the
+previous image had parked it, and the counter came up at 0 as expected.
+Retracting from there should cross the edge within about twenty full steps: the
+reversal dead band measured 19 to 20 earlier the same day, and 64 steps crossed
+it reliably in dozens of cycles.
+
+It did not cross in **640 full steps, 2.03 mm**, issued as 150 completed moves
+with `stator_faults` 0 throughout. `stator_opto` stayed at 0 and
+`stator_opto_edge` is still NaN, meaning the level has not changed once since
+boot. Even the pre-rework behaviour, when a retraction moved the stage barely
+at all, crossed the edge by 797 steps.
+
+The axis was left where it stopped, at counter -640, deliberately: the barrel
+reading there is the discriminating measurement and moving again would destroy
+it.
+
+### What the evidence already narrows
+
+**A disconnected sensor is unlikely.** GP27 is an input with a pull-up, so an
+open or unpowered sensor floats **high**, reading 1. The stuck level is **0**,
+which is the flag-out-of-slot state and has to be actively driven. The sensor
+looks alive and looks as though it is being told there is no flag.
+
+**The firmware change is an unlikely cause, though not excluded.** Between the
+last image that worked and this one, the only code a jog can reach that changed
+at all is `set_direction`, which lost the dwell block; the rewritten `home()` is
+not called by a jog, and `travel_window()` and `below_datum()` are reached only
+from homing or from a window that an unhomed axis does not enforce.
+`stator_opto` publishes the raw pin level and that path is untouched.
+
+So the weight is on the mechanism: the counter is advancing and the flag is not
+following it.
+
+### The measurement that decides it
+
+Read the barrel. The axis has commanded 640 steps of retraction from a datum at
+0.4176875 inch, and one full step is exactly 0.000125 inch:
+
+| Barrel now reads | Conclusion |
+|---|---|
+| about **0.338 inch** | the drive moved the stage; the fault is in the sensor or the flag |
+| about **0.418 inch**, unchanged | the drive did not move the stage; the coupling, the motor, or ENABLE |
+
+A useful second check, if the first is ambiguous: write `rig_stator_hold = 1`
+and feel whether the motor develops holding torque against detent alone. That
+separates a de-energised driver from a slipping coupling.
+
+Until this is understood, **do not home**: the sequence depends on the sensor
+terminating both searches, and a sensor stuck reading "below the datum" is the
+one failure mode that can drive this axis into the upper stop. The level is
+currently stuck the other way, reading "above the datum", which would fault
+safely on the downward seek rather than run away, but that is not a reason to
+try it.
