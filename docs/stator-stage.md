@@ -21,10 +21,10 @@ deliberately does not do. Hardware evidence belongs in `notes.md`, not here.
   mechanism is always left in the same contact state.
 - Absolute position is meaningful only after homing. Before that, absolute
   moves are refused and the reported position is `NaN`.
-- The datum sits at one extreme of travel, with a hard stop just past it.
-  Homing bounds how far it goes into that clearance, always moves away from
-  the stop first, and refuses to run at all in the geometry where the
-  configured backoff would not fit.
+- The datum sits near the **middle** of the travel, with hard stops well clear
+  on both sides. Homing gets below it retracting, stands off, and advances onto
+  the edge, and the blind advance is bounded far more tightly than the retract
+  because the upper stop has much less run-out than the lower one.
 
 ### One thing still to establish
 
@@ -34,8 +34,12 @@ direction, because a screw is deterministic even when the stage it pushes is
 not, and the advance-only rule would be needed for positioning but not for
 homing. If it moves with the stage, the rule applies to homing too. The
 firmware assumes the stricter case, which costs a little homing time and is
-correct either way. The measured 1/1000 inch repeatability is consistent with
-both, so it does not settle the question.
+correct either way.
+
+The 2026-08-17 measurements do not settle it either. The datum repeats to about
+one full step, 3.2 µm, which is consistent with both, and the 19 to 20 step
+reversal dead band is a property of the coupling rather than of where the flag
+is mounted.
 
 ## Hardware
 
@@ -145,10 +149,12 @@ coupled directly to the barrel:
 | Per revolution | 200 steps | 1600 steps |
 | Over 25 mm of travel | 7874 steps | 62 992 steps |
 
-**The motor is not yet identified**, so 200 full steps per revolution is an
-assumption to be confirmed at commissioning, as is the absence of any gearing
-or belt reduction between motor and barrel. Both are checked by the
-steps-per-millimetre procedure below.
+**Both were confirmed on 2026-08-17** by the steps-per-millimetre procedure
+below, so the full-step column is measured rather than assumed: 800 commanded
+steps moved the barrel 0.100 inch exactly, four whole turns onto the same
+graduation. The motor is still not identified by part number, but it behaves as
+a 200-step 1.8° two-phase motor coupled directly to the barrel, which is what
+the arithmetic needs.
 
 ### The one constant that can bite
 
@@ -165,6 +171,27 @@ are converted to steps with the same wrong constant. The protections that do
 work are the current-limit potentiometer and the commissioning check below.
 The constant therefore defaults to `1.0`, matching an unmodified carrier, and
 must be raised to `8.0` only once the strapping is confirmed by inspection.
+
+### Travel and limits
+
+Measured by hand on 2026-08-17, as barrel readings, which is how
+`STATOR_TRAVEL_MIN_MM` and `STATOR_TRAVEL_MAX_MM` are configured:
+
+| | Barrel | Relative to the datum |
+|---|---|---|
+| Lower hard stop | 0.100 in, 2.540 mm | −8.07 mm |
+| Soft lower limit | 0.125 in, 3.175 mm | −7.43 mm |
+| **Datum** | 0.4176875 in, 10.609 mm | 0 |
+| Soft upper limit | 0.710 in, 18.034 mm | +7.43 mm |
+| Upper hard stop | 0.715 to 0.720 in | +7.55 to +7.68 mm |
+
+**The run-out is very unequal.** There is 0.635 mm below the lower soft limit
+and only 0.13 to 0.25 mm above the upper one. The upper limit sits close to its
+stop because that is where the interesting operating case lies, so approaching
+it deserves more care than the lower end until the hardware is revised to give
+more headroom. This asymmetry is why homing's final approach carries its own
+bound, `STATOR_APPROACH_MAX_MM`, a fifth of the search bound used for the
+retract.
 
 ### Datum repeatability sets the accuracy budget
 
@@ -252,13 +279,6 @@ write error.
 | `rig_stator_backlash` | mm | overshoot used by the unidirectional approach |
 | `rig_stator_datum` | mm | the micrometer reading at the opto datum |
 | `rig_stator_hold` | — | 1 holds current between moves, 0 de-energises |
-| `rig_stator_dwell` | s | diagnostic hold at each direction reversal, 0 in normal use |
-
-`rig_stator_dwell` exists because a retracting move reverses in the middle, and
-at working rates that reversal is over too quickly to see which phase is which
-by eye. Setting it, and dropping `rig_stator_rate`, makes the mechanism
-watchable. It is polled rather than slept through, so `rig_stator_stop` still
-works during one, and a move that never reverses never pauses.
 
 Read-only telemetry:
 
@@ -283,49 +303,41 @@ This follows the same convention as `rig_laser_range`.
 
 ### Homing
 
-Homing is the only way the axis learns where it is, and it is the most delicate
-thing the axis does, because **the datum sits at one extreme of travel**. There
-is a hard stop just past the edge, and only a short clearance between the two.
+Homing is the only way the axis learns where it is. The datum sits near the
+**middle** of the travel, so the sequence has one shape and no geometry cases:
 
-Two constraints have to hold at once:
+1. **Get below the datum.** If the opto says the stage is above it, retract
+   until it says below. Bounded by `STATOR_SEEK_MAX_MM`.
+2. **Stand off** by `STATOR_HOME_BACKOFF_MM`, retracting further, which clears
+   the reversal dead band so the flag genuinely moves.
+3. **Advance slowly onto the edge** and stop there. Bounded by
+   `STATOR_APPROACH_MAX_MM`.
 
-- the datum must be latched **during an advance**, because that is the only
-  motion that positions an unpreloaded stage;
-- the sequence must bound how far it ever intrudes into the clearance.
+The datum is latched during an advance because that is the motion that
+positions the stage against the spindle. Step 3 is the only place homing
+advances blind.
 
-Which of these is awkward depends on the geometry, described by
-`STATOR_DATUM_AT_ADVANCED_EXTREME`:
+**The two bounds are deliberately very different, and this is the safety
+argument.** Step 1 retracts, and the lower stop has 0.635 mm of run-out sitting
+7.4 mm beyond the datum, so overshooting there is cheap and it gets the full
+8 mm search. Step 3 advances toward an upper stop with only 0.13 to 0.25 mm of
+run-out, so it gets 0.4 mm: enough to undo the 0.2 mm backoff and cross the
+0.06 mm dead band with three times the margin it needs, and no more. That caps
+the net upward excursion of a whole homing sequence at 0.2 mm.
 
-**Datum at the advanced extreme.** Advancing already points at the edge. Homing
-retreats into the open working range, clears the edge by
-`STATOR_HOME_BACKOFF_MM`, then advances onto it and stops. The retreat happens
-in open travel and the intrusion into the clearance is a single step. This is
-the easy case.
+One hazard cannot be designed out, and is worth stating plainly. A sensor that
+fails reading "below the datum" makes homing skip step 1 and advance the full
+0.4 mm blind. If the stage were already at the upper soft limit that could
+touch the upper stop. Reaching the edge at all requires advancing further than
+the backoff, so no choice of bound removes this; the current-limit
+potentiometer is what makes it a stall rather than damage, which is why it is
+the axis's real mechanical fuse.
 
-**Datum at the retracted extreme.** Advancing points away from the edge, so
-homing has to enter the clearance, retreat into it by the backoff, and advance
-back out onto the edge. Every part of the final approach is inside the
-clearance, so `STATOR_DATUM_CLEARANCE_MM` must be comfortably larger than
-`STATOR_HOME_BACKOFF_MM`. **Homing refuses to run when it is not**, rather than
-homing by driving into the stop.
-
-In both cases the first thing homing does is check whether the stage is already
-in the clearance and, if so, leave it, moving away from the hard stop. So the
-first motion of a blind home is always away from the stop, whichever side of
-the edge the stage powered up on.
-
-Both approaches step **one at a time, waiting for each pulse to be executed**
-rather than queuing them. This matters more than it looks: at the FIFO's eight
-queued steps, the sensor would be read up to eight steps ahead of the
-mechanism, which at full step is 25 µm, the size of the entire datum
-repeatability budget. Stepping in lockstep with the mechanism reduces the
-overshoot to one step.
-
-Every search is bounded by `STATOR_SEEK_MAX_MM`, derived from the travel so the
-edge is reachable from wherever the stage powered up. Exceeding it faults, and
-because the failure mode of a dead or disconnected sensor is to travel that
-far into a stop, the current-limit potentiometer is what makes it a stall
-rather than damage.
+Every step of both searches waits **for its pulse to be executed** rather than
+queuing them. This matters more than it looks: the counter leads the mechanism
+by 10 to 11 queued steps, measured, which at full step is 32 to 35 µm, ten
+times the datum's own repeatability. Stepping in lockstep reduces the overshoot
+to one step.
 
 The opto sensor is an **edge**, not a vane, so its state alone says which side
 of the datum the stage is on and the search cannot get lost past a narrow flag.
@@ -353,11 +365,16 @@ quiescent by inspection.
 Do these in order, once, at commissioning, and record the results in
 `notes.md`.
 
-**0. Establish the datum geometry.** Which extreme of travel the datum sits at,
-expressed as `STATOR_DATUM_AT_ADVANCED_EXTREME`, and how much clearance lies
-between the edge and the hard stop. Homing cannot be run safely without both.
-Determine which side the sensor changes on by hand, before the motor is
-coupled, and confirm `STATOR_OPTO_HIGH_BEYOND_DATUM` with a meter.
+**0. Establish the datum geometry.** *Done on 2026-08-17.* Where the hard stops
+are, and which side of the datum the sensor reads high on. Homing cannot be run
+safely without both.
+
+The answer was not the one the design assumed. The datum sits near the middle
+of the travel, not at an extreme: stops at 0.100 inch and about 0.715 to
+0.720 inch, with the datum at 0.4177. `STATOR_OPTO_HIGH_BELOW_DATUM` is `true`,
+measured by advancing across the edge and watching the level go high to low.
+The one-sided travel window and the pair of constants describing an extremum
+were removed with this step.
 
 **1. Confirm the microstepping strapping by inspection**, and set
 `STATOR_MICROSTEPS` to match. Do this before anything moves. *Done on
@@ -410,12 +427,10 @@ same-direction approach to get hysteresis alone, and subtract. Set
 `src/config.rs`. Without a preload spring, expect this to be large.
 
 **6. Travel limits.** Two numbers, both measured by hand once the datum is
-established. `STATOR_DATUM_CLEARANCE_MM` is the travel between the datum edge
-and the hard stop just past it, and it bounds everything homing does inside
-that clearance. `STATOR_TRAVEL_RANGE_MM` is the working travel on the far side.
-Both default to guesses made before the geometry was known, 0.5 mm and 5 mm.
-Measure the clearance **before the first home**, since it is what decides
-whether homing is safe at all in the retracted-extreme geometry.
+established. `STATOR_TRAVEL_MIN_MM` and `STATOR_TRAVEL_MAX_MM` are the
+soft limits, configured as barrel readings because the stops are fixed on the
+barrel while the datum is an estimate a later home may revise. See the travel
+table above for the measured values and their unequal run-out.
 
 The soft window is derived from these and is one-sided: all of the operating
 travel lies on the working side of the datum, and the clearance is run-out for

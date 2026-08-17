@@ -126,31 +126,41 @@ change of analogue board, specimen, or exciter.
   seen earlier the same day stopped once the reworked coupling had been
   exercised, and is read as bedding in; re-measure after the rig has stood
   overnight, because its return would falsify that.
-- **Keep the barrel between 0.2 and 0.725 inch** (David, 2026-08-17). In the
-  units the axis uses, with the datum at 0.4176875 inch and one full step
-  exactly 0.000125 inch:
+- **Travel limits, measured by hand on 2026-08-17.** The datum sits near the
+  middle of the travel, not at an extreme. One full step is exactly
+  0.000125 inch.
 
-  | Bound | Barrel | From the datum | Counter, this power-up |
+  | | Barrel | From the datum | Run-out |
   |---|---|---|---|
-  | Lower | 0.2 inch, 5.08 mm | -1741 steps, -5.53 mm | -1581 |
-  | Datum | 0.4176875 inch, 10.609 mm | 0 | 160.5 |
-  | Upper | 0.725 inch, 18.415 mm | +2458 steps, +7.81 mm | +2619 |
+  | Lower hard stop | 0.100 inch, 2.540 mm | -2541 steps, -8.07 mm | |
+  | Soft lower limit | 0.125 inch, 3.175 mm | -2341 steps, -7.43 mm | 0.635 mm |
+  | Datum | 0.4176875 inch, 10.609 mm | 0 | |
+  | Soft upper limit | 0.710 inch, 18.034 mm | +2338 steps, +7.42 mm | **0.13 to 0.25 mm** |
+  | Upper hard stop | 0.715 to 0.720 inch | +2378 to +2418 steps | |
 
-  The upper bound is the interesting one and may be raised later. **Nothing in
-  the firmware enforces this.** The soft travel window applies only once homed,
-  and before homing the only bound is `STATOR_SEEK_MAX_MM` on a single jog, so
-  repeated jogs can walk anywhere. Until the axis is homed the envelope is the
-  operator's discipline, and it belongs in any host script that drives the axis.
-- **The datum is not at an extreme of travel**, which the firmware's travel
-  model assumes it is. The envelope above puts 5.5 mm of sanctioned travel
-  below the datum and 7.8 mm above it, so `STATOR_DATUM_CLEARANCE_MM` at 0.5 mm
-  describes a short run-out to a hard stop that is not there on either side.
-  See the entry below on what homing needs.
-- **Do not home until the datum geometry is measured.** A homing search is
-  bounded by `STATOR_SEEK_MAX_MM`, currently 6.5 mm, so it can travel far
-  outside any envelope that has been shown to be safe by hand. It also needs
-  `STATOR_DATUM_AT_ADVANCED_EXTREME` and `STATOR_DATUM_CLEARANCE_MM` to be
-  right, and both are still guesses.
+  **The upper run-out is the one to respect**: barely 0.005 to 0.010 inch,
+  where the lower has a full barrel turn. The upper limit is close to its stop
+  because that is where the interesting operating case lies, and David intends
+  to revise the hardware for more headroom. Until then treat the top of the
+  window with more caution than the bottom.
+
+  Now in `src/config.rs` as `STATOR_TRAVEL_MIN_MM` and `STATOR_TRAVEL_MAX_MM`,
+  expressed as barrel readings rather than distances from the datum, because
+  the stops are fixed on the barrel while the datum is an estimate a later home
+  may revise.
+
+  **The firmware enforces this only once homed.** Before homing there is no
+  window, and the only bound is `STATOR_SEEK_MAX_MM` on a single jog, so
+  repeated jogs still walk anywhere. Until the axis has been homed the envelope
+  remains the operator's discipline and belongs in any host script.
+- **Homing has still never been run**, and the code that would run it was
+  rewritten on 2026-08-17 and has not executed on hardware. The blockers that
+  stood before are gone: the geometry is measured, the constants that described
+  a datum at an extreme are deleted, and the backoff moves the flag now that
+  the coupling follows a retraction. What remains is that a first home is an
+  unexercised code path pointed at a mechanism with 0.13 mm of run-out at one
+  end. Supervise it, with a hand on the supply, and check `stator_opto_edge`
+  against the counter afterwards.
 - **Jog order matters while the axis is unsettled.** A move approaches its
   target from one backlash allowance below it, so a retracting jog travels
   further than it asks: from rest, `jog -0.635` swings to -0.886 mm, which is
@@ -1612,3 +1622,85 @@ made by guessing which of the two booleans to flip. What is needed first:
 
 Until then homing stays unrun, and the envelope stays the operator's
 responsibility.
+
+## The travel model is two-sided now, and the spent diagnostics are gone (2026-08-17)
+
+David measured the hard stops, at 0.100 inch and 0.715 to 0.720 inch, and
+revised the upper working limit to 0.710. That settles the geometry and
+contradicts the assumption the axis was designed around, which was his own and
+which he retracted: **the datum is not at an extreme of travel.** It sits within
+two full steps of the midpoint of the window.
+
+### What changed in the firmware
+
+The one-sided travel model is gone, replaced by two barrel readings.
+
+| Removed | Replaced by |
+|---|---|
+| `STATOR_DATUM_AT_ADVANCED_EXTREME` | nothing; there is no geometry case left |
+| `STATOR_DATUM_CLEARANCE_MM` | nothing; there is no short clearance |
+| `STATOR_TRAVEL_RANGE_MM` | `STATOR_TRAVEL_MIN_MM`, `STATOR_TRAVEL_MAX_MM` |
+| `STATOR_TRAVEL_ADVANCE_MM`, `STATOR_TRAVEL_RETRACT_MM` | as above |
+| `STATOR_OPTO_HIGH_BEYOND_DATUM` | `STATOR_OPTO_HIGH_BELOW_DATUM`, still `true` |
+
+The limits are configured as **barrel readings**, not as distances from the
+datum, and `travel_window()` converts them through the runtime datum. The stops
+are fixed on the barrel; the datum is an estimate a later home may revise. This
+way a correction to `rig_stator_datum` moves the step bounds so they keep
+describing the same two physical positions, which is the behaviour that cannot
+surprise anyone.
+
+`beyond_datum()` became `below_datum()`. The old name meant "in the short
+clearance between the edge and the hard stop", which was never what the sensor
+said and is now not a thing that exists.
+
+### Homing lost a whole branch, and gained a second bound
+
+With no extremum there is no awkward geometry, so the two-case approach
+collapsed to one: get below the datum retracting, stand off by the backoff,
+advance slowly onto the edge. The refusal that guarded the retracted-extreme
+case went with it.
+
+More important is the new `STATOR_APPROACH_MAX_MM`, 0.4 mm, bounding the final
+advance separately from the 8 mm `STATOR_SEEK_MAX_MM` that bounds the retract.
+The old code used the same bound for both, which with the measured geometry
+would have let a failed sensor advance 6.5 mm from just below the datum: past
+the upper stop, by an order of magnitude. The asymmetry in the code now matches
+the asymmetry in the run-out, 0.635 mm below against 0.13 mm above.
+
+One hazard survives and cannot be designed out. A sensor failing in the "below
+the datum" state makes homing skip the retract and advance 0.4 mm blind, which
+from the upper soft limit could touch the stop. Reaching the edge requires
+advancing further than the backoff, so no bound removes it. The current-limit
+potentiometer is the fuse, which is the argument for setting it low.
+
+### Diagnostics removed
+
+`rig_stator_dwell` and its `STATOR_DWELL_S`, `MAX_STATOR_DWELL_S`, the atomic,
+the parameter, its validation, and the polled hold inside `set_direction`. It
+existed to make a direction reversal watchable by eye during bring-up, when it
+was not yet known which phase of a retract-then-advance was which. That question
+is long answered, and it was costing a branch and a poll loop on the move path.
+The parameter count drops from 60 to 59 and the name disappears from the wire.
+
+Kept, with the reasoning recorded on the declarations so it is not revisited
+from scratch:
+
+- **`stator_opto`** is not a diagnostic. On an unhomed axis it is the only
+  position feedback there is, and with the datum mid-travel "which side am I
+  on" is operationally useful rather than merely interesting.
+- **`stator_opto_edge`** stays until homing has been commissioned, because it
+  is the only lost-step check available before `stator_home_error` works, and
+  it is what the first home should be validated against. Marked in
+  `telemetry.rs` as a candidate for removal after that.
+
+The `diag-*` build features were reviewed and all eight are live: each is
+referenced from `src/`, and the two that forward to the platform still name
+features that exist at the pinned v0.2.3. Nothing stale there.
+
+### Checks
+
+All six software gates pass: `cargo fmt --check`, `clippy -D warnings`, both
+board builds, `helic-deps-check`, and `helic-rt-layout`. **Not flashed**, so
+none of this is hardware-verified: the rig is still running `0.1.0 9be46f2`,
+which predates every change in this entry.

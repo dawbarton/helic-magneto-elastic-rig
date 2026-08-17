@@ -29,17 +29,27 @@ pub static STATOR_STEPS: AtomicU32 = AtomicU32::new(0);
 pub static STATOR_STATE: AtomicU32 = AtomicU32::new(StatorState::NotHomed as u32);
 /// Set once a homing sequence has completed.
 pub static STATOR_HOMED: AtomicU32 = AtomicU32::new(0);
-/// Microsteps between the predicted and actual datum at the last re-home. The
-/// lost-step audit; its noise floor is the datum's own repeatability, about 64
-/// microsteps. See `docs/stator-stage.md`.
+/// Steps between the predicted and actual datum at the last re-home. The
+/// lost-step audit; its noise floor is the datum's own repeatability, measured
+/// at about one full step on 2026-08-17. See `docs/stator-stage.md`.
 pub static STATOR_HOME_ERROR: AtomicU32 = AtomicU32::new(0);
 /// Raw opto sensor level, 1 when the input reads high. Deliberately the pin
-/// level rather than `beyond_datum`, so commissioning can establish the
-/// sensor's polarity instead of assuming `STATOR_OPTO_HIGH_BEYOND_DATUM`.
+/// level rather than `below_datum`, which made the sensor's polarity
+/// measurable at commissioning rather than assumed. It stays because on an
+/// unhomed axis it is the only position feedback there is: it says which side
+/// of the datum the stage sits on, and with the datum near the middle of the
+/// travel that is genuinely useful rather than merely diagnostic.
 pub static STATOR_OPTO: AtomicU32 = AtomicU32::new(0);
 /// Step count at which the opto level last changed. Latched in the stepping
 /// path, so the edge is located to the step that crossed it rather than to
-/// whenever the host next asked. Meaningless until an edge has been seen.
+/// whenever the host next asked. Meaningless until an edge has been seen, and
+/// during a move it leads the mechanism by the ten or eleven steps of FIFO
+/// measured on 2026-08-17.
+///
+/// Retained deliberately after the bring-up it was added for: until homing has
+/// been commissioned it is the only lost-step check available, and it is what
+/// the first home should be validated against. Once `stator_home_error` has
+/// been shown to work, this is a candidate for removal.
 pub static STATOR_OPTO_EDGE: AtomicU32 = AtomicU32::new(NAN_BITS);
 
 /// Completed moves, for wear and audit.
@@ -58,7 +68,6 @@ pub static STATOR_RATE_MM_S: AtomicU32 = AtomicU32::new(0);
 pub static STATOR_BACKLASH_MM: AtomicU32 = AtomicU32::new(0);
 pub static STATOR_DATUM_MM: AtomicU32 = AtomicU32::new(0);
 pub static STATOR_HOLD: AtomicU32 = AtomicU32::new(0);
-pub static STATOR_DWELL_S: AtomicU32 = AtomicU32::new(0);
 
 /// Packed `(sequence << 8) | kind`. A parameter write changes the whole word,
 /// so the task can tell a repeated command from a stale one and act on each

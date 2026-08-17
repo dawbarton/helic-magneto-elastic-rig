@@ -31,16 +31,14 @@ use crate::board::MagnetoelasticParts;
 use crate::config::{
     DAC_OUT_CEILING_V, DAC_OUT_FLOOR_V, DISPLACEMENT_MAX_MM, DISPLACEMENT_MIN_MM,
     LASER_RANGE_MM as DEFAULT_LASER_RANGE_MM, LASER_STALE_AFTER_S, MAX_STATOR_BACKLASH_MM,
-    MAX_STATOR_DWELL_S, MAX_STATOR_RATE_MM_S, OUTPUT_CHANNEL,
-    STATOR_BACKLASH_MM as DEFAULT_STATOR_BACKLASH_MM, STATOR_DATUM_MM as DEFAULT_STATOR_DATUM_MM,
-    STATOR_DWELL_S as DEFAULT_STATOR_DWELL_S, STATOR_HOLD_DEFAULT,
+    MAX_STATOR_RATE_MM_S, OUTPUT_CHANNEL, STATOR_BACKLASH_MM as DEFAULT_STATOR_BACKLASH_MM,
+    STATOR_DATUM_MM as DEFAULT_STATOR_DATUM_MM, STATOR_HOLD_DEFAULT,
     STATOR_RATE_MM_S as DEFAULT_STATOR_RATE_MM_S, STATOR_SEEK_MAX_MM,
 };
 use crate::stator::{issue_command, CMD_HOME, CMD_JOG, CMD_MOVE, CMD_STOP};
 use crate::telemetry::{
     LASER_FRAMES_RECEIVED, LASER_RANGE_MM, LASER_VALUE, STATOR_BACKLASH_MM, STATOR_DATUM_MM,
-    STATOR_DWELL_S, STATOR_HOLD, STATOR_JOG_MM, STATOR_POSITION_MM, STATOR_RATE_MM_S,
-    STATOR_TARGET_MM,
+    STATOR_HOLD, STATOR_JOG_MM, STATOR_POSITION_MM, STATOR_RATE_MM_S, STATOR_TARGET_MM,
 };
 
 /// Index of the laser distance within the measured input vector, after the
@@ -388,7 +386,6 @@ impl Rig for MagnetoelasticRig {
             "rig_stator_backlash",
             "rig_stator_datum",
             "rig_stator_hold",
-            "rig_stator_dwell",
         ]
     }
 
@@ -404,7 +401,6 @@ impl Rig for MagnetoelasticRig {
             DEFAULT_STATOR_BACKLASH_MM,
             DEFAULT_STATOR_DATUM_MM,
             STATOR_HOLD_DEFAULT,
-            DEFAULT_STATOR_DWELL_S,
         ]
     }
 
@@ -438,9 +434,6 @@ impl Rig for MagnetoelasticRig {
             // thing as an approach with no overshoot.
             7 if value.is_finite() && value > 0.0 && value <= MAX_STATOR_BACKLASH_MM => Some(value),
             9 if value == 0.0 || value == 1.0 => Some(value),
-            // Diagnostic dwell at direction reversals. Zero is meaningful here,
-            // being the normal operating value.
-            10 if value.is_finite() && (0.0..=MAX_STATOR_DWELL_S).contains(&value) => Some(value),
             _ => None,
         }
     }
@@ -464,7 +457,6 @@ impl Rig for MagnetoelasticRig {
             7 => STATOR_BACKLASH_MM.store(value.to_bits(), Ordering::Relaxed),
             8 => STATOR_DATUM_MM.store(value.to_bits(), Ordering::Relaxed),
             9 => STATOR_HOLD.store(value.to_bits(), Ordering::Relaxed),
-            10 => STATOR_DWELL_S.store(value.to_bits(), Ordering::Relaxed),
             _ => {}
         }
     }

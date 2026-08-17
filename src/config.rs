@@ -129,40 +129,45 @@ pub const STATOR_DIR_ADVANCE_HIGH: bool = true;
 /// de-energised motor.
 pub const STATOR_ENABLE_ACTIVE_HIGH: bool = false;
 
-/// Opto sensor level seen beyond the datum edge, that is on the short side
-/// between the edge and the hard stop. The sensor is an edge rather than a
-/// vane, so this level alone says which side of the datum the stage is on.
-pub const STATOR_OPTO_HIGH_BEYOND_DATUM: bool = true;
-
-/// True when advancing moves the stage toward the datum, and so toward the
-/// hard stop just past it.
+/// Opto sensor level seen **below** the datum edge, that is on the retracted
+/// side. The sensor is an edge rather than a vane, so this level alone says
+/// which side of the datum the stage is on.
 ///
-/// The datum sits at one **extreme** of travel, so one side of the edge is a
-/// short clearance and the other is the whole working range. Which side is
-/// which decides how homing can reach the edge, because the final motion onto
-/// the datum has to be an advance for the unpreloaded stage to be positioned
-/// by it:
-///
-/// - datum at the advanced extreme (`true`): advancing already points at the
-///   datum, so the approach ends on the edge having intruded into the
-///   clearance by one step;
-/// - datum at the retracted extreme (`false`): advancing points away from the
-///   datum, so homing has to enter the clearance first, by
-///   `STATOR_HOME_BACKOFF_MM`, and advance back onto the edge. That case needs
-///   `STATOR_DATUM_CLEARANCE_MM` to be comfortably the larger of the two, and
-///   homing refuses to run when it is not.
-///
-/// Not yet established for this rig; confirm before the first home.
-pub const STATOR_DATUM_AT_ADVANCED_EXTREME: bool = true;
+/// Measured on 2026-08-14 and on every crossing since: advancing across the
+/// edge takes the level from high to low, so high is the retracted side.
+pub const STATOR_OPTO_HIGH_BELOW_DATUM: bool = true;
 
-/// Usable travel between the datum edge and the hard stop just past it.
-/// Deliberately small until measured, because everything that intrudes into
-/// this clearance is bounded against it.
-pub const STATOR_DATUM_CLEARANCE_MM: f32 = 0.5;
-
-/// Working travel on the far side of the datum, away from the hard stop.
-/// Conservative and set before the geometry was known.
-pub const STATOR_TRAVEL_RANGE_MM: f32 = 5.0;
+/// Soft travel window, as **barrel readings** rather than as distances from
+/// the datum.
+///
+/// The readings are the physically fixed quantity: the hard stops sit at
+/// particular points on the barrel, whereas the datum is an estimate that a
+/// later home may revise. Expressing the window this way means the step bounds
+/// follow any correction to `rig_stator_datum` and keep describing the same
+/// two physical positions.
+///
+/// Measured by hand on 2026-08-17:
+///
+/// | | Barrel | Note |
+/// |---|---|---|
+/// | Lower hard stop | 0.100 inch, 2.540 mm | measured |
+/// | `STATOR_TRAVEL_MIN_MM` | 0.125 inch, 3.175 mm | one barrel turn clear of it |
+/// | Datum | 0.4176875 inch, 10.609 mm | see `STATOR_DATUM_MM` |
+/// | `STATOR_TRAVEL_MAX_MM` | 0.710 inch, 18.034 mm | chosen bound |
+/// | Upper hard stop | 0.715 to 0.720 inch | measured, only 0.005 to 0.010 inch clear |
+///
+/// **The margins are very unequal, and the upper one is small**: 0.635 mm of
+/// run-out below, against 0.13 to 0.25 mm above. The upper limit is close to
+/// the stop because that is where the interesting operating case lies. Until
+/// the hardware is revised to give more headroom, anything approaching
+/// `STATOR_TRAVEL_MAX_MM` deserves more caution than the lower end, and the
+/// homing approach is bounded accordingly; see `STATOR_APPROACH_MAX_MM`.
+///
+/// Note the datum lies within two full steps of the midpoint of this window,
+/// so it is **not** at an extreme of travel. An earlier revision of this file
+/// assumed it was, and derived a one-sided window from that assumption.
+pub const STATOR_TRAVEL_MIN_MM: f32 = 3.175;
+pub const STATOR_TRAVEL_MAX_MM: f32 = 18.034;
 
 /// Delay between energising the driver and the first step. The driver's own
 /// wake is the smaller part of this: coil current is restored in well under a
@@ -188,65 +193,59 @@ pub const STATOR_RATE_MM_S: f32 = 0.5;
 pub const STATOR_HOME_FAST_MM_S: f32 = 0.5;
 pub const STATOR_HOME_SLOW_MM_S: f32 = 0.1;
 
-/// Distance retracted past the datum edge before the final slow advance onto
+/// Distance retracted below the datum edge before the final slow advance onto
 /// it.
 ///
-/// Back at 0.2 mm, but not because 0.2 mm is sufficient: measurement on
-/// 2026-08-14 showed no backoff in this range moves the stage at all. See
-/// [`STATOR_BACKLASH_MM`]. A larger value buys nothing, so the small one is
-/// kept until the stage is preloaded, at which point this must be re-measured.
-/// **Homing must not be run until then**; it would latch a datum from a stage
-/// that never moved.
+/// 0.2 mm is 63 full steps against a reversal dead band measured at 19 to 20
+/// on 2026-08-17, so the backoff moves the flag properly with about three
+/// times the margin it needs. Before the coupling rework of that day a
+/// retraction transmitted no motion at all and this was inert at any setting;
+/// that is no longer the case.
 pub const STATOR_HOME_BACKOFF_MM: f32 = 0.2;
 
-/// Bound on any homing search. Exceeding it faults rather than continuing,
-/// because the alternative is driving into a hard stop. It has to exceed the
-/// full travel, so that the edge is reachable from wherever the stage happens
-/// to be at power-on, which also means a failed or disconnected sensor buys
-/// this much travel into a stop before homing gives up. The current-limit
-/// potentiometer is what makes that a stall rather than damage.
-pub const STATOR_SEEK_MAX_MM: f32 = STATOR_TRAVEL_RANGE_MM + STATOR_DATUM_CLEARANCE_MM + 1.0;
-
-/// Default overshoot for the unidirectional approach. With no preload spring
-/// the stage is only positioned by the spindle pushing it, so this is what
-/// makes a retracting move deterministic at all rather than a refinement.
+/// Bound on homing's **coarse** phase, the retract that gets the stage below
+/// the datum before the final approach. It has to exceed the travel available
+/// above the datum, 7.43 mm, so the datum is reachable from anywhere in the
+/// window; retracting is the safe direction to overshoot in, because the lower
+/// stop has 0.635 mm of run-out and lies 7.4 mm further on.
 ///
-/// Measurement on 2026-08-14 found there is no useful value. Retracting from a
-/// settled advanced position by 0.2, 0.4, 0.8 and 1.6 mm never moved the stage
-/// past a datum edge only 0.17 mm below it; only a 2.53 mm retraction did, and
-/// even then the stage had crept just 0.17 mm while the spindle withdrew 2.53.
-/// Without a preload nothing pulls the stage after the spindle, so a retraction
-/// simply opens a gap and leaves the stage where it was.
-///
-/// So the compensation is inert at any plausible setting rather than merely
-/// undersized, and a larger value costs travel to buy nothing. Kept small.
-/// **A retracting move does not currently reposition the stage**, and the
-/// position it reports afterwards is not to be believed. Advancing moves are
-/// unaffected and repeat to about one microstep. The fix is mechanical: preload
-/// the stage against the spindle, then measure this properly.
-pub const STATOR_BACKLASH_MM: f32 = 0.25;
+/// Also bounds a single jog on an unhomed axis, where no window is enforced,
+/// so a mistyped distance cannot traverse the micrometer in one command.
+pub const STATOR_SEEK_MAX_MM: f32 = 8.0;
 
-/// Soft travel window, as distances from the datum along the advance and
-/// retract directions. Because the datum is at an extreme of travel the window
-/// is one-sided by construction: all of the working range lies on one side of
-/// the datum, and the other side is the clearance to the hard stop, which is
-/// run-out for homing and not travel to operate in. Targets are therefore
-/// bounded by the datum itself in that direction, and rejected rather than
-/// clamped when they exceed it.
+/// Bound on homing's **final approach**, the slow advance from the backoff
+/// position onto the datum edge. Separate from, and far smaller than,
+/// [`STATOR_SEEK_MAX_MM`], because this is the only part of homing that
+/// advances blind and the upper hard stop has barely 0.13 mm of run-out.
+///
+/// It must exceed the backoff plus the dead band, 0.2 + 0.06 mm, to reach the
+/// edge at all. At 0.4 mm it has three times the margin it needs and caps the
+/// net upward excursion of a homing sequence at 0.2 mm.
+///
+/// The residual hazard, stated plainly: a sensor that fails reading "below the
+/// datum" skips the coarse phase, so homing advances the full 0.4 mm blind. If
+/// the stage were already at `STATOR_TRAVEL_MAX_MM` that could touch the upper
+/// stop, and the current-limit potentiometer is what makes it a stall rather
+/// than damage. No bound can remove this: reaching the edge at all requires
+/// advancing further than the backoff. It is the reason the potentiometer is
+/// the axis's real mechanical fuse.
+pub const STATOR_APPROACH_MAX_MM: f32 = 0.4;
+
+/// Default overshoot for the unidirectional approach: how far below a target a
+/// retracting move goes before advancing onto it, so that every move ends in
+/// the same contact state.
+///
+/// 0.25 mm is 79 full steps against a reversal dead band measured at 19 to 20
+/// on 2026-08-17, about four times what it needs. Before the coupling rework
+/// of that day a retraction moved the stage not at all, and this compensation
+/// was inert at any setting rather than merely undersized; it now does what it
+/// was written to do. The measurement to repeat if the coupling is disturbed
+/// again is the dead band, not this constant.
 ///
 /// One consequence worth knowing: because a move approaches its target from
 /// one backlash allowance below it, targets within `rig_stator_backlash` of
-/// the datum-side limit cannot be reached, and are refused.
-pub const STATOR_TRAVEL_ADVANCE_MM: f32 = if STATOR_DATUM_AT_ADVANCED_EXTREME {
-    0.0
-} else {
-    STATOR_TRAVEL_RANGE_MM
-};
-pub const STATOR_TRAVEL_RETRACT_MM: f32 = if STATOR_DATUM_AT_ADVANCED_EXTREME {
-    STATOR_TRAVEL_RANGE_MM
-} else {
-    0.0
-};
+/// `STATOR_TRAVEL_MIN_MM` cannot be reached, and are refused.
+pub const STATOR_BACKLASH_MM: f32 = 0.25;
 
 /// Bounds accepted for the corresponding runtime parameters. A rate above a
 /// few mm/s would need an acceleration ramp, which this axis does not
@@ -254,16 +253,6 @@ pub const STATOR_TRAVEL_RETRACT_MM: f32 = if STATOR_DATUM_AT_ADVANCED_EXTREME {
 /// means something mechanical is wrong rather than needing compensation.
 pub const MAX_STATOR_RATE_MM_S: f32 = 3.0;
 pub const MAX_STATOR_BACKLASH_MM: f32 = 2.0;
-
-/// Diagnostic dwell held at each reversal of direction, in seconds.
-///
-/// Zero in normal use. Set it from the host to watch the mechanism: a move that
-/// retracts past its target and advances back onto it reverses in the middle,
-/// and at working rates that reversal is over too quickly to see which phase is
-/// which. The dwell separates them. It is interruptible, so a stop still takes
-/// effect promptly during one.
-pub const STATOR_DWELL_S: f32 = 0.0;
-pub const MAX_STATOR_DWELL_S: f32 = 30.0;
 
 /// Barrel reading at the opto datum, in mm. `rig_stator_datum` overrides it at
 /// runtime, and like `LASER_RANGE_MM` that override is not persisted across a

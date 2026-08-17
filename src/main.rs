@@ -115,7 +115,6 @@ fn main() -> ! {
         telemetry::STATOR_BACKLASH_MM.store(config::STATOR_BACKLASH_MM.to_bits(), Relaxed);
         telemetry::STATOR_DATUM_MM.store(config::STATOR_DATUM_MM.to_bits(), Relaxed);
         telemetry::STATOR_HOLD.store(config::STATOR_HOLD_DEFAULT.to_bits(), Relaxed);
-        telemetry::STATOR_DWELL_S.store(config::STATOR_DWELL_S.to_bits(), Relaxed);
     }
     info!("boot: {} (platform {})", IDENTITY.banner, IDENTITY.platform);
 
