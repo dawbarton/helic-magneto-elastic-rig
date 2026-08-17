@@ -110,6 +110,17 @@ change of analogue board, specimen, or exciter.
   and the soft travel limits do not protect against it because they are
   converted to steps with the same constant. The current-limit potentiometer is
   the real backstop and should be set low.
+- **Do not raise `rig_stator_rate` above 0.5 mm/s.** Measured on 2026-08-17:
+  0.5 mm/s loses no steps over some forty thousand, 1.5 mm/s lost 17 steps in
+  one cycle of three, and 3.0 mm/s lost 16 every cycle. Nothing detects it, so
+  the symptom is a position quietly wrong by tens of microns. The cause is the
+  absence of an acceleration ramp, so the fix is a ramp rather than a smaller
+  increase. `MAX_STATOR_RATE_MM_S` still permits 3.0 and should not be trusted
+  as a safe bound.
+- **The datum drifts about one full step per five minutes**, monotonically and
+  irreversibly, including while the axis is idle and de-energised (2026-08-17).
+  Whether the stage moves or the opto's trip point does is not yet separated.
+  Re-datum within a session if better than a few microns matters.
 - **Do not home until the datum geometry is measured.** A homing search is
   bounded by `STATOR_SEEK_MAX_MM`, currently 6.5 mm, so it can travel far
   outside any envelope that has been shown to be safe by hand. It also needs
@@ -1243,3 +1254,111 @@ settle-stepped refinement, and a logged sweep with its plot. All wait on
 2026-08-14 harness bug that waited on `stator_state` and issued its next
 command into a still-running move. Ask before relying on them again: they are
 diagnostic scaffolding, not a committed tool.
+
+## Datum repeatability, a slow drift, and the rate at which steps go missing (2026-08-17)
+
+Three runs on the same flashed image, 3285 moves in total, `stator_faults` 0
+throughout, `loop_time_max` 45 us against the 60 us limit, `overruns` 0 and
+`records_dropped` unchanged at its pre-session 497. Counts are full steps of
+3.175 um.
+
+Each cycle measures both datum crossings by single-stepping, with a bulk
+excursion in between: creep down through the retracting crossing, retract the
+rest of the excursion, come back to a guard position 60 steps below the edge,
+then creep up through the advancing crossing. Both crossings are therefore
+settle-stepped and neither carries the FIFO lead. Because the retracting
+crossing is recorded before the bulk moves and the advancing one after, **the
+dead band measured within a cycle is a lost-step detector**: it is 19 whenever
+the bulk moves were faithful, and departs from 19 by exactly the number of
+steps they lost, signed by which direction lost them.
+
+### Repeatability at the working rate is one full step
+
+Sixteen cycles at 0.5 mm/s, retractions of 200, 400, 600 and 800 full steps
+(0.64 to 2.54 mm) interleaved rather than blocked, then ten more cycles later
+in the session:
+
+| Quantity | Value |
+|---|---|
+| Advancing crossing, 26 cycles | 184 to 186, **spread 1 to 2 full steps** |
+| Standard deviation, first 16 | 0.50 full steps, 1.6 um |
+| Dependence on excursion length | **none detectable** |
+| Dead band | 19 in every cycle |
+| Faults | 0 |
+
+So the axis returns to the datum within about one step, 3.2 um, after
+excursions of up to four barrel revolutions. That is eight times inside the
+25.4 um the design budgeted, and it holds equally at 0.64 and 2.54 mm of
+excursion.
+
+### The spread is a slow monotone drift, and it is not reversible
+
+The one-step spread is not scatter. Over the first sixteen cycles the advancing
+crossing steps 184 to 185 at cycle 7 and the retracting crossing 165 to 166 at
+cycle 10. **A lost step would move both at the same instant**, since both are
+read from the same counter. They moved three cycles apart, and the dead band
+read 20 only in the window between the two transitions before returning to 19,
+which is the signature of a continuous drift quantised at two different
+sub-step phases rather than of a counter slip.
+
+The obvious explanation was thermal, the motor being energised almost
+continuously through a run. That is wrong, or at least incomplete. After eight
+minutes idle with the driver de-energised, the crossings did not return: they
+had gone one step **further**, to 186 and 167, and stayed there for ten
+cycles. The drift runs at roughly one full step per five minutes, about
+0.5 um/min, and it continues while nothing is moving.
+
+Three candidates remain, not separated:
+
+- the reworked coupling bedding in, which should decay and is the easiest to
+  test, by repeating this measurement after some hours;
+- a slow thermal equilibration of the whole assembly driven by something other
+  than the motor, the laser and the analogue cape being the obvious sources;
+- drift in the opto sensor's own trip point, which would masquerade as
+  position drift.
+
+**This measurement cannot tell a moving stage from a moving trip point**, and
+the distinction matters: the first corrupts position and the second only
+corrupts the datum. Separating them needs an independent displacement measure
+against the barrel.
+
+Practically, at 0.5 um/min the drift reaches the 25.4 um budget in about fifty
+minutes, so re-datum within a session if better than a few microns is wanted,
+and do not expect the datum to hold to a single step across a long one.
+
+### Raising the traverse rate loses steps, silently
+
+Nine cycles at a fixed 800-step excursion with the rate interleaved across
+0.5, 1.5 and 3.0 mm/s. The creeps that measure the crossings always ran at
+0.5 mm/s, so any loss is attributable to the bulk move rather than to the
+measurement. Steps lost per retract-and-return, from the dead-band diagnostic:
+
+| Bulk rate | Full steps/s | Steps lost per cycle |
+|---|---|---|
+| 0.5 mm/s | 157 | 0, 0, +1 |
+| 1.5 mm/s | 472 | +1, +3, **+17** |
+| 3.0 mm/s | 945 | **-16, -16, -16** |
+
+Over the nine cycles the advancing crossing walked from 186 to 159, 27 full
+steps, 86 um, entirely through the fast cycles. `stator_faults` stayed at 0 the
+whole time: nothing in the firmware notices, and nothing can, because the axis
+is open loop between datum crossings.
+
+This is what "no acceleration ramp" costs. The first step of every move is
+issued at the full traverse rate from standstill, so 3.0 mm/s asks a small
+stepper for 945 steps/s from rest under load, well past any plausible pull-in
+rate. The reliability of the -16 at 3.0 mm/s suggests a repeatable slip early
+in each move rather than random loss.
+
+Consequences:
+
+- **`STATOR_RATE_MM_S` stays at 0.5 mm/s.** It is verified faithful over some
+  forty thousand steps across this session.
+- **1.5 mm/s is not a safe intermediate.** Two of three cycles were clean and
+  the third lost 17 steps, which is the worst available failure mode:
+  intermittent, silent, and invisible until the next home.
+- **`MAX_STATOR_RATE_MM_S` at 3.0 permits a rate that reliably corrupts
+  position.** It is a validation bound rather than a recommendation, but it
+  currently lets a host set a value that silently loses a step per sixty. Worth
+  lowering to about 1.0 until an acceleration ramp exists. Not changed here:
+  it is a hardware judgement, and the ramp is the real fix.
