@@ -9,6 +9,9 @@ HELIC-DAQ firmware for the magneto-elastic rig, maintained separately from the
   checking.
 - `notes.md`: hardware verification status and bring-up constraints. Read and
   update it when doing hardware work.
+- `docs/stator-stage.md`: the stator axis in full. Before touching the axis
+  read "The stator stage: units first" below, which is short and is the part
+  that causes silent errors.
 - The platform's `docs/developer_guide.md`, section "Adding a rig in its own
   repository", is the contract this repository implements; its "Extending",
   "Timing" and "Output safety gate" sections govern the code here.
@@ -53,6 +56,81 @@ constants rather than tuning knobs:
   hardware decision, recorded in `notes.md`.
 - The `arm` parameter, and only the host, arms the gate. Firmware may latch a
   trip but never clear one.
+
+## The stator stage: units first
+
+`docs/stator-stage.md` is the full description and `notes.md` holds the
+evidence. This section is the part that bites.
+
+### Inches on the instrument, millimetres in the software
+
+**The micrometer is imperial. Everything in the firmware, the wire protocol and
+the host tooling is metric.** The conversion is exact in both directions, so
+there is never a rounding argument, only a units one:
+
+| Quantity | Millimetres | Inches |
+|---|---|---|
+| One full step | 0.003175 | 0.000125 exactly |
+| One barrel turn, 200 full steps | 0.635 exactly | 0.025, that is 1/40 |
+| The datum | 10.609 | 0.4176875 |
+| Soft travel window | 3.175 to 18.034 | 0.125 to 0.710 |
+
+**The trap is writing a barrel reading straight into a millimetre parameter.**
+Every stator parameter that carries a position, `rig_stator_target`,
+`rig_stator_jog` and `rig_stator_datum`, is in **millimetres**. A barrel reading
+of 0.418 written to `rig_stator_datum` is not a small error, it is a factor of
+25.4, and it is silent: 0.418 is an entirely plausible-looking millimetre value,
+it is inside the parameter's accepted range, and nothing downstream can tell it
+from a real one. Multiply by 25.4 on the way in, every time, and say which unit
+you mean in any note, commit message or comment.
+
+The same applies in reverse when reporting. Prefer quoting both, as the table
+above does, whenever a number is going to be read next to a barrel.
+
+Step counts are a third unit and are **full steps of 3.175 µm**, not
+microsteps, because MS1/MS2 are unstrapped and `STATOR_MICROSTEPS` is 1.0. The
+firmware's identifiers say "microstep" throughout, which stays correct if the
+carrier is ever strapped; recorded evidence must say full steps, or it silently
+changes meaning by a factor of eight on the day that happens.
+
+### Using the axis
+
+- **Home once per session, then trust the counter.** The datum repeats to
+  better than one full step, and re-homing costs travel and time without
+  buying accuracy. Write any non-zero value to `rig_stator_home`.
+- **Prove the sensor changes state before the first home of a session.** Jog
+  across the datum and watch `stator_opto` go 1 to 0 and back. A sensor stuck
+  reading "below the datum" is the one failure that can drive this axis into a
+  hard stop, and this check takes a minute.
+  `data/stator-2026-08-17/commission_home.py --check` does it.
+- **After a reflash the counter is zero and means nothing.** It is not a
+  position until the axis is homed, however plausible it looks, and this has
+  already caused one false fault report. The same applies to anything moved by
+  hand.
+- **Never raise `rig_stator_rate` above 0.5 mm/s.** Measured: 1.5 mm/s lost 17
+  steps in one cycle of three and 3.0 mm/s lost 16 every cycle, silently, with
+  no fault raised. The cause is the absence of an acceleration ramp, so the fix
+  is a ramp, not a smaller increase.
+- **The upper limit has almost no run-out.** 0.13 to 0.25 mm to the hard stop,
+  against 0.635 mm at the lower end. Treat the top of the window with more care
+  than the bottom.
+- **Only advancing moves position the stage**, so every move ends with an
+  advance and a target within `rig_stator_backlash` of the lower limit is
+  refused rather than clamped.
+- **The soft window is enforced only once homed.** Before that a single jog is
+  bounded but repeated jogs walk anywhere, so the travel limits are the
+  operator's responsibility until a home has run.
+- **Do not step during a capture.** The `stator` sample source makes any
+  violation visible after the fact: a capture whose `stator` column is constant
+  is quiescent by inspection.
+
+### Checking a session's work
+
+`stator_home_error` is the lost-step audit: re-home at the end of a session and
+it reports, in full steps, how far the datum turned out to be from where the
+counter predicted. Zero is the expected answer and what ten consecutive homes
+gave on 2026-08-17. Anything else means steps were lost, and the first thing to
+suspect is a rate that was raised.
 
 ## Platform constraints that still apply
 
