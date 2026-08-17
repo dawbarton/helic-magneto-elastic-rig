@@ -100,7 +100,12 @@ change of analogue board, specimen, or exciter.
   contradict the measured opto polarity; and the axis has never been homed. `docs/stator-stage.md` holds the commissioning
   procedure, and none of it beyond first motion has been done.
 - **Microstepping is not strapped**, so `STATOR_MICROSTEPS` stays at 1.0 and
-  the driver is in full step, 3.175 µm per step. Raising that constant without
+  the driver is in full step, 3.175 µm per step. Every step count recorded in
+  this file was therefore taken in full step, including the ones the earlier
+  entries call microsteps, which is the firmware's name for the counter's unit
+  rather than a statement about the strapping. Read them as full steps until an
+  entry says otherwise, and prefer the millimetre and micrometre figures, which
+  do not change meaning when MS1/MS2 are eventually strapped. Raising that constant without
   strapping MS1/MS2 makes every move eight times too long, into the end stop,
   and the soft travel limits do not protect against it because they are
   converted to steps with the same constant. The current-limit potentiometer is
@@ -1121,7 +1126,7 @@ default `helic-rt-regression` with no probe attached reports no acceptance
 errors, 606 writes in the write phase at 45 us against the 60 us limit, 8000
 records, no lost packets, no index gaps.
 
-## The stage now follows a retraction: dead band 19 microsteps (2026-08-17)
+## The stage now follows a retraction: dead band 19 full steps (2026-08-17)
 
 David reworked the coupling between the stage and the stepper, to get a better
 mechanical connection than the push-only contact of 2026-08-14. The rework is
@@ -1129,18 +1134,28 @@ his to describe; what follows is only what the axis now does. Measured on the
 image already flashed, `0.1.0 9be46f2`, which is one commit behind `main` and
 differs from it only by the platform repin to v0.2.3, nothing in the axis.
 
-**The datum edge is at 184 microsteps** from the power-on counter zero, that
+**Counts here are full steps, 3.175 um each.** MS1/MS2 are still unstrapped, so
+the driver is in full step and `STATOR_MICROSTEPS` is 1.0. The firmware calls
+the counter's unit a microstep throughout, which is right in code because
+`STATOR_MM_PER_MICROSTEP` scales with the constant, and wrong in recorded
+evidence, where a bare count silently changes meaning by a factor of eight the
+day the strapping is done. Every step count in this file predates that
+strapping, so read "microstep" in the earlier entries as a full step of
+3.175 um. The distances in millimetres and micrometres are unaffected either
+way, and are the figures to trust.
+
+**The datum edge is at 184 full steps** from the power-on counter zero, that
 is 0.584 mm of advance from wherever the stage sat when it booted. Found by
-advancing in 100-microstep jogs with the host polling during each move and
+advancing in 100-full-step jogs with the host polling during each move and
 issuing `rig_stator_stop` on the first opto change, so the overshoot past the
 edge was bounded by the poll interval rather than by the jog length. It turned
 up in the second jog: the stage was already sitting just below the edge.
 
 **The stage follows a retraction now.** This is the result that matters, and it
 reverses the 2026-08-14 finding directly. With `rig_stator_backlash` set to
-0.001 mm, which rounds to zero microsteps and so makes a negative jog a pure
-retract, 64 microsteps of retraction (0.203 mm) brought the opto back to 1. On
-2026-08-14 the same axis was retracted 503 microsteps (1.6 mm) and crossed
+0.001 mm, which rounds to zero full steps and so makes a negative jog a pure
+retract, 64 full steps of retraction (0.203 mm) brought the opto back to 1. On
+2026-08-14 the same axis was retracted 503 full steps (1.6 mm) and crossed
 nothing at all. The backlash compensation is therefore no longer inert, and
 `move_to`'s retract-then-advance sequence does what it was written to do.
 
@@ -1149,34 +1164,34 @@ Note that `rig_stator_backlash` rejects an exact zero: it validates as
 
 ### The crossings, settle-stepped
 
-Single-microstep jogs remove the FIFO lead, because each move drains the queue
+Single-full-step jogs remove the FIFO lead, because each move drains the queue
 before it reports, so the published level belongs to the settled step. Three
-retract-advance cycles, then a further two as a logged sweep 45 microsteps
+retract-advance cycles, then a further two as a logged sweep 45 full steps
 either side of the edge:
 
 | Quantity | Value |
 |---|---|
-| Retracting crossing | 165 microsteps, all five cycles |
-| Advancing crossing | 184 microsteps, all five cycles |
-| Reversal dead band | **19 microsteps, 60.3 um** |
-| Advancing spread | **0 microsteps**, so under 3.175 um |
+| Retracting crossing | 165 full steps, all five cycles |
+| Advancing crossing | 184 full steps, all five cycles |
+| Reversal dead band | **19 full steps, 60.3 um** |
+| Advancing spread | **0 full steps**, so under 3.175 um |
 
 The sweep also shows the transition is clean: one change of level in each
-direction over 45 microsteps either side, no chatter near the edge. The figure
+direction over 45 full steps either side, no chatter near the edge. The figure
 is `edge_sweep.png`, regenerated from `edge_sweep.csv` by the harness described
 below.
 
 Two consequences for the constants, and neither needs a change:
 
-- `STATOR_BACKLASH_MM` at 0.25 mm is 79 microsteps, four times the measured
+- `STATOR_BACKLASH_MM` at 0.25 mm is 79 full steps, four times the measured
   dead band. Correct as it stands, and the small value David preferred on
   2026-08-14 is now right for the right reason rather than by accident.
-- `STATOR_HOME_BACKOFF_MM` at 0.2 mm is 63 microsteps, comfortably past the
+- `STATOR_HOME_BACKOFF_MM` at 0.2 mm is 63 full steps, comfortably past the
   dead band. Homing's back-off-and-reapproach would now actually move the
   flag, which it could not before. That removes one of the two reasons homing
   was blocked; the other is still open, below.
 
-### The FIFO lead is 10 to 11 microsteps, not 8
+### The FIFO lead is 10 to 11 full steps, not 8
 
 The coarse scan's latches can be differenced against the settle-stepped truth,
 in both directions:
@@ -1188,7 +1203,7 @@ in both directions:
 | Retracting, dead-band run | 154 | 165 | 11 |
 
 So `stator_opto_edge` read from a normal move leads the mechanism by 10 to 11
-microsteps, 32 to 35 um, rather than the eight the design assumed. The extra
+full steps, 32 to 35 um, rather than the eight the design assumed. The extra
 words are the OSR and the pulse in flight on top of the eight-word joined FIFO.
 It does not affect homing, which settle-steps its approach for exactly this
 reason, but it does mean an edge latched during an ordinary move is worth about

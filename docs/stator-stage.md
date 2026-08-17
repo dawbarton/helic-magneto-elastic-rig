@@ -172,7 +172,7 @@ Previous testing indicates the opto sensor gives about 1/1000 inch, that is
 25.4 µm, of repeatability. That is 8 full steps, or 64 microsteps, and it is
 the dominant error term. **The budget below is the conservative one and has not
 yet been revised**, but it now looks pessimistic: five settle-stepped advancing
-crossings of the datum edge on 2026-08-17 all landed on the same microstep, so
+crossings of the datum edge on 2026-08-17 all landed on the same step, so
 the edge itself repeats to better than 3.175 µm. That is the sensor and the
 approach, not the whole homing sequence, which has still never been run. Three
 consequences follow from the budgeted figure:
@@ -198,7 +198,7 @@ and it was measured on 2026-08-14: 1.6 mm of retraction moved the stage past
 nothing at all.
 
 Since the mechanical rework of 2026-08-17 the stage does follow a retraction,
-with a reversal dead band of 19 microsteps, 60 µm. **The firmware still assumes
+with a reversal dead band of 19 full steps, 60 µm. **The firmware still assumes
 the weaker case**, and should: the retract-then-advance approach costs one
 backlash allowance of travel and is correct under either coupling, whereas
 trusting a retract is only correct under one. See `notes.md` for the
@@ -468,7 +468,7 @@ the claim should be measured rather than asserted.
   stage travels those few microns after the abort is issued.
 - The step counter leads reality during a move, since it counts words queued
   rather than pulses emitted. The lead is the eight-word joined FIFO plus the
-  OSR and the pulse in flight, **measured at 10 to 11 microsteps, 32 to 35 µm**,
+  OSR and the pulse in flight, **measured at 10 to 11 full steps, 32 to 35 µm**,
   on 2026-08-17 by differencing latched against settle-stepped crossings. This
   matters for telemetry read mid-move and for any edge latched during an
   ordinary move; homing settle-steps its approach and is unaffected.
