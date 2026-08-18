@@ -28,10 +28,12 @@ axis has never been homed. See the standing constraints below and
 Exceptions, all electrical rather than real-time. The DAC output path is
 verified as it was driven before 2026-08-12, with channel A alone against a
 fixed channel C; the symmetric A/C drive that replaced it is timing-verified
-but has not been observed on a scope. ADC channel 0 was rewired to a stator
-coil (`coil`) and its calibration has not been established. ADC channel 1
-(`drive`) is declared in firmware but not yet wired. See the last two bring-up
-entries below.
+and, since 2026-08-18, confirmed at exactly double amplitude through the
+`drive` loopback, though still not independently observed on a scope with the
+exciter powered. ADC channel 0 was rewired to a stator coil (`coil`) and its
+calibration has not been established. ADC channel 1 (`drive`) is wired and
+calibrated against `out`, with the exciter unpowered; see the last three
+bring-up entries below.
 
 The exciter drive is only as safe as the limits in `src/config.rs`, and those
 limits are compile-time constants that describe the fitted hardware. Re-check
@@ -74,20 +76,24 @@ change of analogue board, specimen, or exciter.
     output, so captures from before that date hold current, not coil voltage,
     and the two are not comparable.
   - `drive` (channel 1) is the exciter current controller's differential
-    input. Declared in firmware on 2026-08-12; wiring due 2026-08-13. Until
-    that is done the input is open and the source reads noise, so check it is
-    actually connected before believing it.
+    input. Declared in firmware on 2026-08-12; wired on 2026-08-18 and
+    calibrated against `out` the same day, with the exciter unpowered.
   The wire-visible names changed with this: `adc0` became `coil` and `adc1`
   became `drive`, and `rig-profile.toml` follows. Sources are discovered by
   name, so host code and saved captures predating this will not match on the
   old names.
-- **`drive` is uncalibrated.** It taps the exciter controller's input rather
-  than the DAC pins, so any cape buffer gain or attenuation is inside the
-  reading and `drive` is **not** a priori `2 * out`. Measure the ratio once
-  against a scope and record it here before using `drive` quantitatively; until
-  then it establishes only that the output path moves, not by how much. Note
-  also that this makes `drive` sensitive to cape changes in a way a direct DAC
-  tap would not be, so recheck it after any analogue board swap.
+- **`drive` calibration against `out`, exciter unpowered: `drive` = 2.0000 ×
+  `out` − 0.0002 V.** Measured 2026-08-18 over an eleven-point sweep from
+  -1.9 V to +1.9 V, ADC-side, well inside the AD7609's ±10 V range even at the
+  DAC rails; residual against that fit was ≤36 µV, an order of magnitude below
+  `coil`'s own noise floor. It taps the exciter controller's input rather than
+  the DAC pins, so this is sensitive to cape changes in a way a direct DAC tap
+  would not be, and should be rechecked after any analogue board swap. **The
+  exciter was unpowered for this measurement.** If the tap point includes an
+  actively buffered input stage inside the exciter's current controller, its
+  gain could differ once that controller is powered; treat the ratio as
+  provisional until repeated live, ideally cross-checked against a scope on
+  channels A and C directly. See the 2026-08-18 bring-up entry below.
 - **The stator stage has moved, but is not calibrated or homed.** The axis was
   wired and first driven on 2026-08-14, two jogs of one revolution, and the
   firmware emitted exactly the steps it should. The direction convention and
@@ -1971,3 +1977,72 @@ overruns, no new dropped records.
 Still outstanding: **the barrel has not been read by eye since homing.** That is
 the one check that does not go through the same sensor, and it is what would
 catch the datum being self-consistently wrong.
+
+## DAC output path checked, `drive` wired and calibrated, exciter unpowered (2026-08-18)
+
+David wired the DAC outputs to the exciter input, and looped that input back to
+ADC channel 1 (`drive`), closing the two outstanding items from the 2026-08-12
+`coil`/`drive` bring-up entry. The exciter itself was unpowered throughout, so
+the full commanded range, including deliberately over-range commands, was safe
+to exercise. Firmware `0.1.0 346a445`, script and figure at
+`data/dac-check-2026-08-18/`.
+
+### Method
+
+A persistent Python session (`helic_daq.Device`), not the one-shot CLI: `helic-daq set arm 1`
+refuses on principle (`the one-shot CLI cannot keep the output armed`), because
+arming does not survive a dropped control connection and the CLI closes its
+connection after every invocation. Worth remembering for any future scripted
+check that needs the output live for more than one request.
+
+With the rig armed, `forcing_coeffs`' DC term was swept over
+-1.9, -1.5, -1.0, -0.5, -0.2, 0, 0.2, 0.5, 1.0, 1.5, 1.9 V, plus ±5 V
+deliberately outside the software clamp, each level held 0.1 s to settle then
+captured for 0.2 s (`coil`, `drive`, `out`) at the full 8 kHz rate. Forcing and
+target were zeroed and the rig disarmed again afterwards.
+
+### Results
+
+**`out` tracks the commanded value exactly** up to the clamp, and the clamp
+lands exactly on `DAC_OUT_CEILING_V − MID_RAIL` and `MID_RAIL − DAC_OUT_FLOOR_V`,
+±1.952 V, with the `clamped` safety bit set only on the two over-range points.
+The safety gate is doing precisely what `src/config.rs` says it does.
+
+**`drive` = 2.0000 × `out` − 0.0002 V**, fit over the eleven in-range points,
+residual ≤36 µV. That is the calibration ratio the 2026-08-12 entry asked for,
+and it is almost exactly the topology's nominal doubling from driving A and C
+symmetrically about `MID_RAIL` (`MID_RAIL + out` / `MID_RAIL − out`). A stuck C
+channel would have given a ratio near 1, not 2, so this is also the first
+evidence beyond timing that the symmetric A/C drive is real, though it is
+still an ADC measurement rather than an independent scope trace on A and C.
+
+**The pair never approached the AD7609's ±10 V differential range**: ±3.9 V
+at full DAC swing, so item 1 of the 2026-08-12 to-do list (check the exciter
+input's levels before connecting) is closed too, at least for the unpowered
+case.
+
+**`coil` stayed at its pre-existing noise floor throughout**, a band of about
+40 µV, roughly an order of magnitude below `drive`'s residual and far below
+its step size: no measurable crosstalk from the drive path onto the sense
+coil.
+
+### What this does and does not establish
+
+The exciter was unpowered for all of it. This is good evidence for the DAC,
+the cape, and the loopback wiring, but not that the 2.0000 ratio holds once
+the exciter's current controller is powered: `drive` taps that controller's
+input rather than the DAC pins directly (see the standing constraint above),
+and if that input stage buffers actively rather than passively, its gain could
+change with power applied. **Recalibrate once the exciter is live**, ideally
+cross-checked against a scope on channels A and C, before trusting `drive`
+quantitatively during a real experiment.
+
+### A safety-bitfield reading worth remembering
+
+`clamped` and `quieted` in the `safety` word are cumulative since the last
+`diag_reset`, not instantaneous: the `clamped` bit stayed set after the output
+was zeroed and the rig disarmed again, because the ±5 V over-range commands
+had clamped earlier in the same session. Matches `RtShared`'s implementation
+(`safety_clamp_ticks`/`safety_quiet_ticks` counters) rather than being a
+surprise, but it is easy to misread a stale bit as a live condition
+mid-session; `diag_reset` clears it.
