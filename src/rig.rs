@@ -58,11 +58,14 @@ pub const MID_RAIL: f32 = DAC_VREF / 2.0;
 
 /// DAC channel wired to the negative differential input of the exciter
 /// current controller (AD5064 channel C). Driven symmetrically with the
-/// positive channel (A) every tick: `MID_RAIL - out` against A's
-/// `MID_RAIL + out`, so the differential swing is `2 * out` rather than the
-/// `out` available from driving A alone against a fixed reference. This
-/// doubles the achievable output range within the same 0-4.096 V unipolar
-/// DAC rail.
+/// positive channel (A) every tick: `MID_RAIL - out/2` against A's
+/// `MID_RAIL + out/2`, so the differential swing (A - C) equals `out`
+/// directly, matching what the `drive` loopback measures. Each channel still
+/// uses the full 0-4.096 V unipolar DAC rail, so `out`'s achievable range is
+/// twice what driving A alone against a fixed reference would give; only the
+/// mapping from `out` to each channel changed on 2026-08-18 (previously
+/// `MID_RAIL + out` / `MID_RAIL - out`, a differential of `2 * out`), not the
+/// physical range.
 pub const NEG_REF_CHANNEL: usize = 2;
 
 // Raw chip-select access is the one place pin identity cannot be recovered
@@ -196,12 +199,13 @@ impl Rig for MagnetoelasticRig {
     //   the specimen-side measurement, not the actuator drive.
     // - `drive`: the exciter current controller's own differential input,
     //   which is the DAC output after whatever the analogue cape does to it.
-    //   It is therefore NOT a priori equal to `2 * out`: any cape buffer gain
-    //   or attenuation sits inside this reading, so the volts-per-volt factor
-    //   against `out` has to be measured once and recorded in `notes.md`
-    //   before this source is used quantitatively. Its purpose is to make the
-    //   output path observable in software at all, which it was not once
-    //   channel 0 moved to the coil.
+    //   Since 2026-08-18 `out` is defined as the differential command, so
+    //   `drive` is nominally `out`, but it is still NOT a priori exactly
+    //   equal: any cape buffer gain or attenuation sits inside this reading,
+    //   so the volts-per-volt factor against `out` has to be measured and
+    //   recorded in `notes.md` before this source is used quantitatively.
+    //   Its purpose is to make the output path observable in software at
+    //   all, which it was not once channel 0 moved to the coil.
     const INPUTS: &'static [(&'static str, &'static str)] = &[
         ("coil", "V"),
         ("drive", "V"),
@@ -279,20 +283,22 @@ impl Rig for MagnetoelasticRig {
         let out = outputs[0];
         #[cfg(feature = "diag-skip-dac")]
         let _ = out;
-        // Drive A and C symmetrically about the common-mode reference so
-        // `out` is half the signed differential drive (A - C) = 2 * out:
-        // out = 0 rests both channels at MID_RAIL. No sign inversion (A up,
-        // C down = more drive). Each channel is independently clamped into
-        // the unipolar 0-4.096 V range by the DAC driver; `clamp_output`
-        // keeps `out` within the symmetric margin that keeps both channels
+        // Drive A and C symmetrically about the common-mode reference so the
+        // signed differential drive (A - C) equals `out` directly, matching
+        // what the `drive` loopback measures: each channel moves by half of
+        // `out`. out = 0 rests both channels at MID_RAIL. No sign inversion
+        // (A up, C down = more drive). Each channel is independently clamped
+        // into the unipolar 0-4.096 V range by the DAC driver; `clamp_output`
+        // keeps `out` within the margin that keeps both half-swung channels
         // inside that range. The two words are spaced by `wait_word_settle`
         // to respect the AD5064's inter-word settling time.
         #[cfg(not(feature = "diag-skip-dac"))]
         {
+            let half = out * 0.5;
             self.dac_raw
-                .write_volts(self.output_channel, MID_RAIL + out);
+                .write_volts(self.output_channel, MID_RAIL + half);
             wait_word_settle();
-            self.dac_raw.write_volts(NEG_REF_CHANNEL, MID_RAIL - out);
+            self.dac_raw.write_volts(NEG_REF_CHANNEL, MID_RAIL - half);
         }
     }
 
@@ -319,13 +325,15 @@ impl Rig for MagnetoelasticRig {
     fn clamp_output(&self, actuator: usize, out: f32) -> f32 {
         debug_assert_eq!(actuator, 0);
         // Hard amplitude ceiling: clamp the logical command so both driven
-        // channel voltages, `MID_RAIL + out` (A) and `MID_RAIL - out` (C),
-        // stay inside the safe DAC window. `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V`
-        // are symmetric about `MID_RAIL`, so the same bound on `out` protects
-        // both channels. Applied after the controller/forcing/table sum, so
-        // no single stage can push the exciter past it. The AD5064 driver's
-        // own 0-4.096 V clamp remains as a final backstop.
-        clamp_channel_command(out, MID_RAIL, DAC_OUT_FLOOR_V, DAC_OUT_CEILING_V)
+        // channel voltages, `MID_RAIL + out/2` (A) and `MID_RAIL - out/2`
+        // (C), stay inside the safe DAC window set by `DAC_OUT_FLOOR_V`/
+        // `DAC_OUT_CEILING_V`. `clamp_channel_command` clamps a per-channel
+        // deviation from `MID_RAIL`, so it is applied to `out/2` and the
+        // clamped half doubled back into `out`'s own (differential) units.
+        // Applied after the controller/forcing/table sum, so no single stage
+        // can push the exciter past it. The AD5064 driver's own 0-4.096 V
+        // clamp remains as a final backstop.
+        clamp_channel_command(out * 0.5, MID_RAIL, DAC_OUT_FLOOR_V, DAC_OUT_CEILING_V) * 2.0
     }
 
     #[inline]

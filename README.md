@@ -28,10 +28,11 @@ this repository implements.
     `notes.md` before using it quantitatively.
 - AD5064 four-channel DAC on the same core-1 SPI bus. Channels A and C are the
   exciter's differential current-controller inputs, driven symmetrically about
-  the 2.048 V common-mode point (`MID_RAIL + out` on A, `MID_RAIL - out` on C),
-  so the differential drive is twice the logical command. The fitted output
-  stages are all unipolar, so a logical output of zero rests both channels at
-  that common-mode point.
+  the 2.048 V common-mode point (`MID_RAIL + out/2` on A, `MID_RAIL - out/2`
+  on C), so the differential drive equals the logical command directly
+  (`drive` is nominally `out`, cape gain aside). The fitted output stages are
+  all unipolar, so a logical output of zero rests both channels at that
+  common-mode point.
 - optoNCDT laser on UART0 TX/RX through separate TTL↔RS422 paths. The firmware
   configures the measuring rate and distance-only RS422 output at startup. A
   disconnected input requires the external 10 kΩ pull-up on GP1 described in
