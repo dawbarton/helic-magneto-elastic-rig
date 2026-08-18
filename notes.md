@@ -2132,3 +2132,36 @@ future controller gain, saved waveform, or mental "V equals volts on the
 channel" habit carried over from before 2026-08-18 will be wrong by a factor
 of two. Worth a line in `AGENTS.md` if this rig starts seeing tuned
 controller gains that depend on `out`'s scale.
+
+## Stator soft lower limit widened, rate cap now enforced in firmware (2026-08-18)
+
+David asked for `STATOR_TRAVEL_MIN_MM = 6.35 mm` (was 3.175 mm) and
+`MAX_STATOR_RATE_MM_S = 0.5 mm/s` (was 3.0). Both are hardware-decision
+constants per `AGENTS.md`, so recorded here.
+
+**`STATOR_TRAVEL_MIN_MM`: one barrel turn clear of the lower hard stop to
+two.** Lower run-out goes from 0.635 mm to 3.81 mm; the datum sits at 4.26 mm
+above the new limit and 7.42 mm below `STATOR_TRAVEL_MAX_MM`, so it is now
+closer to the lower limit than the upper, where it used to sit within two
+full steps of the midpoint. The usable travel below the datum shrinks by the
+same 3.175 mm the run-out gained. `docs/stator-stage.md`'s travel table and
+homing safety-argument figures updated to match.
+
+**`MAX_STATOR_RATE_MM_S`: 3.0 → 0.5 mm/s.** This had been an operator
+instruction only (see the standing constraint above and the 2026-08-17
+lost-step measurements: 1.5 mm/s lost 17 steps in one cycle of three, 3.0
+lost 16 every cycle, silently); the accepted parameter range now matches the
+only rate measured clean. Verified live: `helic-daq set rig_stator_rate 1.0`
+now returns `bad value`, `rig_stator_rate` unchanged at 0.5; setting 0.5
+succeeds.
+
+Firmware `0.1.0 80a222c`, flashed clean (no `+` suffix). `helic-rt-regression`
+passed with an empty `acceptance_errors` list, unchanged from before this
+change. Neither constant is on the tick path, so no timing effect was
+expected or seen.
+
+Not exercised: an actual jog against the new `STATOR_TRAVEL_MIN_MM`, since
+that requires homing first (the soft window is enforced only once homed) and
+homing was out of scope for this change. Worth doing before the lower limit
+is trusted operationally, alongside the barrel-by-eye check still outstanding
+from the homing commissioning entry above.
