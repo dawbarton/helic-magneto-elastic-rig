@@ -653,3 +653,232 @@ point therefore retains full-spectrum host analysis. If PLL and CBC backbone
 results disagree beyond experimental uncertainty, the fundamental phase
 criterion and excitation-force measurement are investigated before adding an
 NCPLL or multi-harmonic controller.
+
+## Review, 2026-08-18
+
+Read against the platform at the pinned tag: `helic-core`'s `pll.rs`,
+`harmonics.rs`, `pid.rs`, and `controller.rs`; `helic-rt`'s `program.rs`,
+`params/groups.rs`, `rig.rs`, and `safety.rs`; `firmware/rt/src/rt_loop.rs`;
+this rig's `config.rs`, `rig.rs`, and `main.rs`; and both `AGENTS.md` files.
+
+The architecture holds and the repository split follows the platform's own
+rules. The loop design has correctness gaps that are cheap to close now and
+expensive later, and the safety story leans on operator prose in the two places
+where this rig has most recently decided the opposite.
+
+### Verified, so it need not be rechecked
+
+- **The blanket adapter compiles.** A two-crate fixture with an upstream
+  blanket `impl<C: Controller, const H: usize> StandardControl<H> for C`, a
+  downstream local implementation, and both `StandardProgram<PassThrough, 16>`
+  and `StandardProgram<RigControl<16>, 16>` builds without a coherence error.
+  A downstream local type cannot acquire a `Controller` implementation from
+  elsewhere, so the overlap check is satisfied. Existing rig aliases survive.
+  The one lasting constraint is that no type may implement both traits.
+- **The shared-frame refactor completes an existing intent rather than adding
+  machinery.** `HarmonicFrame`, `HarmonicGenerator`, and `Pll` are all
+  currently dead code in `helic-core`: exported from `lib.rs` and used by
+  nothing. This proposal is their first consumer.
+- **The sine and cosine saving is real.** `FourierCoeffs::evaluate` walks all
+  `H` harmonics per call, so target and forcing cost 64 lookups per tick at
+  `HARMONICS = 16`. One shared frame costs 32.
+- **The budget arithmetic is right.** Ten inputs, twelve programme signals, one
+  actuator, and `cmd_epoch` is exactly `MAX_SOURCES = 24`. `pll_freq_actual`
+  and `pll_phase_error` are exactly 15 characters; `pll_lock_freq_rate_tol` is
+  22 against the 23-character parameter limit. `MAX_CTRL_PARAMS = 17` does not
+  bind a rig-owned group, and `MAX_GROUPS = 8` is not reached at six groups.
+- **The DC-rejection argument is quantitatively necessary, not defensive.** A
+  mean `D` leaks through synchronous demodulation as roughly
+  `2 D / (omega tau_demod)`, so 25 mm at 30 Hz with `tau_demod = 0.1 s` gives
+  about 2.7 mm of carrier-rate ripple against a sub-millimetre response.
+
+### Correctness gaps
+
+**The mode-change fault pulse can be cleared before it is ever read.** One tick
+runs as apply commands, `step_program`, `program_fault`, then the gate. If
+`apply` sets the pulse and `step` clears it, `Program::fault` never observes it
+and the interlock is decorative. The rule must be stated and tested: `apply`
+sets pending, `step` moves pending into the flag `fault` reads, and the
+following `step` clears that flag.
+
+**The PID's own anti-windup is left disarmed.** `Pid` implements conditional
+integration against `config.out_min` and `out_max`, which default to plus and
+minus `f32::MAX`. The parameter table exposes the four gains and no limits, so
+whenever the safety gate is clamping but not tripped the integrator winds up
+without bound. Reset on re-arm does not cover that case, because no transition
+occurs. Bind the limits to `DAC_OUT_FLOOR_V` and `DAC_OUT_CEILING_V` at
+construction, or expose them as parameters.
+
+**Instrumentation phase bias is unaccounted for and lands on the phase
+criterion.** The excitation reference reaches the loop through the AD7609 at
+OS8, a group delay of tens of microseconds, under a degree at tens of hertz.
+The response reaches it from the optoNCDT over UART, published by core 0 as a
+latest-value atomic, at most one tick stale, plus the sensor's own exposure and
+processing latency, which is nowhere measured in this repository. The two
+channels therefore do not share a time base, and the measured
+excitation-to-response phase carries an unknown fixed delay. A pure delay
+`tau` biases the phase by `-360 f tau` degrees, growing linearly along the
+backbone. This is separate from, and additional to, the `drive`-is-not-force
+problem already recorded above. The open-loop sweep of commissioning step 3
+already produces the necessary data; what is missing is the requirement that
+the fitted phase be decomposed into plant phase plus instrumentation delay
+before `-90 deg` means anything, and that the delay be either compensated in
+`pll_target_phase` or bounded and quoted as a systematic uncertainty on every
+backbone point.
+
+**The loop-bandwidth hierarchy is under-specified.** Only the factor of five to
+ten between phase and amplitude loops is given. Two further constraints matter
+more, and both belong in the tuning section:
+
+- `omega_loop` well below `1 / tau_demod`, itself well below the carrier, or
+  the demodulator pole sits inside the loop; and
+- `omega_loop` well below `zeta omega_n`, the plant's own settling rate.
+
+The PI acts on the assumption that response phase is a static function of
+excitation frequency. That holds only quasi-statically. A loop faster than the
+resonance settles chases its own transient, which is the classic false-lock
+mechanism the simulation section is asked to rule out but is given no criterion
+for. Starting gains should be derived from this hierarchy and then confirmed by
+simulation, not chosen by simulation alone.
+
+**The frequency-slew lock criterion has a quantisation floor.** One
+phase-increment quantum at 8 kHz is `8000 / 2^32`, that is 1.86 microhertz, so
+a single-tick slew estimated from the quantised increment reads 0.0149 Hz/s
+whenever the command moves at all. Computing the slew from the unquantised PI
+output in hertz, and across the lock dwell rather than one tick, removes the
+floor entirely and measures what "stationary for the dwell" actually means.
+
+**The DC estimator's warm-up is a real transient.** Seeding from the first
+sample sets the mean to a point on the waveform, leaving an error of order the
+signal amplitude which decays over `dc_time_constant`. With that constant slow
+relative to the carrier, as required, the transient outlives a 0.1 s lock
+dwell. Require an explicit warm-up of several times
+`max(dc_time_constant, demod_time_constant)` during which no observation is
+valid, and test it. Otherwise the first `Locked` after every arm or reacquire
+rests on corrupted phase.
+
+### Simplifications
+
+- **Drop the correction remainder.** With `f = f_centre + Kp e + I`
+  reconstructed absolutely each tick, rounding once loses nothing: the
+  integrator is floating point and carries the fractional information, and the
+  quantum is 1.86 microhertz. The remainder is a leftover of the current
+  incremental design, `commanded_increment += gain * error * dt`, and keeping
+  it on top of an absolute computation double-counts. The incremental
+  formulation is discarded, not adapted.
+- **Drop `forcing_changed`.** It is a rig-shaped hook in a platform trait,
+  redundant with the `pll_reacquire` pulse specified in the same document, and
+  surprising in use, since any coefficient write including a small harmonic
+  trim would drop the lock. Sweep orchestration is already host-side; let the
+  host pulse `pll_reacquire`.
+- **Drop `disabled_increment`.** It buys one sample of frequency accuracy at
+  arm. Phase is continuous across an increment change, so one sample at the
+  nominal increment is a phase error of `(f_nom - f_centre) / f_s` turns, which
+  is negligible. It costs a second increment-override path whose semantics
+  differ from `next_increment`.
+- **Shrink the `step` signature.** Seven positional arguments, two of them
+  redundant, since `dt` is `sample_rate.dt()`. Pass `&StepCtx` plus one small
+  inputs struct. Redundant parameters that must agree are how they eventually
+  disagree.
+- **Say what happens to `StepCtx`.** It is currently loop-invariant, built once
+  in `run_rt_loop` and stored in `RtLoopState`, and is documented as immutable
+  services. Adding `output_enabled` makes it per-tick state. Either construct
+  it per tick, which costs two words, or pass the flag separately, but choose
+  deliberately rather than contradicting the type's stated character.
+- **Specify who handles `command_id::controller::RESET`.** Today
+  `StandardProgram::apply` special-cases it and offsets every other id by one.
+  If `StandardControl::apply` sees raw ids, a rig control can silently fail to
+  honour `ctrl_reset`. State that the programme keeps routing `RESET` to
+  `reset`, forwards ids of one and above unchanged, and test that mapping
+  specifically rather than under the general heading of commands.
+- **Fix the sign convention so that positive gains are the expected case.**
+  Signed gains are correct, but an operator entering the wrong sign gets a
+  runaway to a frequency bound. Define the error so that a system with the
+  usual negative phase-frequency slope needs positive `pll_kp` and `pll_ki`,
+  and say so beside the parameters.
+
+### Two decisions worth arguing
+
+**Using the safety latch as a state-machine device.** A mode change while armed
+raising a fault works, but it overloads a mechanism whose documented meaning is
+that something unsafe happened, and it turns a routine host action into an
+operator recovery. Core 0 can read `shared.safety.load_inputs().armed`, so the
+natural design is to reject the write with `BadValue` while armed, which is
+synchronous and informative, and keep the real-time fault only as the backstop
+for the case where arming races the write. Same guarantee, better ergonomics.
+
+**`LockLost` tripping the output.** Probably right for a hardening system,
+where losing lock near a fold can precipitate a jump to a large-amplitude
+branch, but the document asserts it rather than arguing it, and does not state
+the operational consequence: every lost lock during an amplitude step ends an
+unattended sweep until a human re-arms. Either justify it on the fold hazard
+explicitly, or make lock loss a latched status with a fallback to fixed
+operation at the last bounded frequency, leaving the displacement window to do
+the safety work it already does.
+
+### Rules that should be firmware, not prose
+
+This rig's most recent precedent is `MAX_STATOR_RATE_MM_S`, where measured
+evidence moved out of `notes.md` into an enforced bound with the reasoning
+recorded beside the constant. Two rules here are left as operator instructions,
+and both bite hard:
+
+- **A free-running table must be off in PLL mode.** Nothing enforces it. Either
+  ignore the table contribution in PLL mode, or refuse entry to PLL mode while
+  `table_mode` is non-zero.
+- **The target mean must be set to the laser resting position before PID
+  mode.** This is the largest single hazard in the document. A zero-mean target
+  against a 25 mm absolute reading is a dimensionally valid 25 mm error that
+  commands full output the instant a gain becomes non-zero. Enforce it with an
+  entry check that `|target_mean - laser|` lies within a bound, or with a
+  bumpless transfer that initialises the integrator so the output is continuous
+  at mode entry.
+
+### Budget and gates
+
+- **The source budget is exactly full, and this document says another channel
+  is needed.** A calibrated excitation-current measurement is required before
+  the science is defensible, and there is no slot for it. Six of the ten inputs
+  are unused spare ADC channels, `adc2` to `adc7`, streamed at 8 kHz. Free
+  them, or move the slow PLL telemetry, `pll_state`, `pll_exc_amp`, and
+  `pll_resp_amp`, which evolve on `demod_time_constant`, to `ExtraParam`
+  atomics, which is the platform's idiom for slow read-only values. Arriving at
+  exactly the cap while knowing another channel is coming is a decision to make
+  now rather than during commissioning.
+- **The 60 microsecond acceptance is stated against a limit already
+  exceeded.** `notes.md` records that `max_loop_us = 60` is exceeded by any
+  parameter write, at 63 to 64 microseconds, from the fixed 140-byte
+  `RtCommand` copy, against 44 to 45 quiet. As written the acceptance is
+  untestable. Phrase it as quiet-tick `loop_time_max` with the known write-tick
+  exception, and quote both.
+
+### Repository ownership
+
+- **The platform half of this document belongs in `helic-daq`**, beside
+  `docs/rt_program_proposal.md` and `docs/rig_decoupling_proposal.md`. This
+  repository's `AGENTS.md` is explicit that platform mechanisms go upstream as
+  a pull request rather than being designed here. Split it: `StandardControl`,
+  the `StandardProgram` refactor, `StepCtx`, and the `Pll` revision upstream;
+  the selectable mode, parameter group, telemetry, and commissioning sequence
+  stay.
+- **The `helic-core` placement rule is two actual consumers.** `Pll` has none
+  today and one after this work, and the CBC Duffing contribution in the
+  delivery sequence is host-side, so it does not become the second firmware
+  consumer. Revising in place remains the right call, because the code is
+  already there and moving it is churn, but say so rather than leaving the rule
+  apparently satisfied.
+- **Two documentation debts travel with the platform tag.**
+  `Controller::reset` claims a lifecycle the platform does not currently
+  implement, and the developer guide's description of the standard signal
+  ordering changes with the reference unit. Both belong in the tag message.
+
+### Suggested order of work
+
+1. The three that change behaviour rather than shape: fault-pulse ordering, PID
+   output limits, and the slew criterion computed from the unquantised command.
+2. The bandwidth hierarchy and the instrumentation-delay decomposition, making
+   commissioning step 3 explicitly responsible for measuring the delay.
+3. Prune `forcing_changed`, `disabled_increment`, and the correction remainder,
+   after which the trait has one increment path and no rig-shaped hooks.
+4. Settle the source budget before implementation rather than after.
+5. Split the document and open the platform half upstream.
