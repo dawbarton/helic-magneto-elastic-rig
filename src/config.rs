@@ -149,27 +149,31 @@ pub const STATOR_OPTO_HIGH_BELOW_DATUM: bool = true;
 /// follow any correction to `rig_stator_datum` and keep describing the same
 /// two physical positions.
 ///
-/// Measured by hand on 2026-08-17:
+/// Measured by hand on 2026-08-17; `STATOR_TRAVEL_MIN_MM` widened to two
+/// barrel turns clear of the hard stop on 2026-08-18 (was one turn, 3.175 mm):
 ///
 /// | | Barrel | Note |
 /// |---|---|---|
 /// | Lower hard stop | 0.100 inch, 2.540 mm | measured |
-/// | `STATOR_TRAVEL_MIN_MM` | 0.125 inch, 3.175 mm | one barrel turn clear of it |
+/// | `STATOR_TRAVEL_MIN_MM` | 0.250 inch, 6.35 mm | two barrel turns clear of it |
 /// | Datum | 0.4176875 inch, 10.609 mm | see `STATOR_DATUM_MM` |
 /// | `STATOR_TRAVEL_MAX_MM` | 0.710 inch, 18.034 mm | chosen bound |
 /// | Upper hard stop | 0.715 to 0.720 inch | measured, only 0.005 to 0.010 inch clear |
 ///
-/// **The margins are very unequal, and the upper one is small**: 0.635 mm of
-/// run-out below, against 0.13 to 0.25 mm above. The upper limit is close to
-/// the stop because that is where the interesting operating case lies. Until
-/// the hardware is revised to give more headroom, anything approaching
-/// `STATOR_TRAVEL_MAX_MM` deserves more caution than the lower end, and the
-/// homing approach is bounded accordingly; see `STATOR_APPROACH_MAX_MM`.
+/// **The margins are still unequal, and the upper one is still the tight
+/// one**: 3.81 mm of run-out below (was 0.635 mm), against 0.13 to 0.25 mm
+/// above. The upper limit is close to the stop because that is where the
+/// interesting operating case lies. Until the hardware is revised to give
+/// more headroom, anything approaching `STATOR_TRAVEL_MAX_MM` deserves more
+/// caution than the lower end, and the homing approach is bounded
+/// accordingly; see `STATOR_APPROACH_MAX_MM`.
 ///
-/// Note the datum lies within two full steps of the midpoint of this window,
-/// so it is **not** at an extreme of travel. An earlier revision of this file
-/// assumed it was, and derived a one-sided window from that assumption.
-pub const STATOR_TRAVEL_MIN_MM: f32 = 3.175;
+/// Note the datum no longer sits near the midpoint of this window after the
+/// widening: it is now noticeably closer to `STATOR_TRAVEL_MIN_MM` (4.26 mm
+/// away) than to `STATOR_TRAVEL_MAX_MM` (7.42 mm away). An earlier revision
+/// of this file assumed the datum was at an extreme of travel and derived a
+/// one-sided window from that assumption; it is not, at either width.
+pub const STATOR_TRAVEL_MIN_MM: f32 = 6.35;
 pub const STATOR_TRAVEL_MAX_MM: f32 = 18.034;
 
 /// Delay between energising the driver and the first step. The driver's own
@@ -257,11 +261,20 @@ pub const STATOR_APPROACH_MAX_MM: f32 = 0.4;
 /// `STATOR_TRAVEL_MIN_MM` cannot be reached, and are refused.
 pub const STATOR_BACKLASH_MM: f32 = 0.25;
 
-/// Bounds accepted for the corresponding runtime parameters. A rate above a
-/// few mm/s would need an acceleration ramp, which this axis does not
-/// implement, and a backlash allowance of more than a couple of millimetres
-/// means something mechanical is wrong rather than needing compensation.
-pub const MAX_STATOR_RATE_MM_S: f32 = 3.0;
+/// Bounds accepted for the corresponding runtime parameters.
+///
+/// `MAX_STATOR_RATE_MM_S` was 3.0 until 2026-08-18; **measured on 2026-08-17,
+/// 1.5 mm/s lost 17 steps in one cycle of three and 3.0 mm/s lost 16 every
+/// cycle, silently, with no fault raised**, because this axis has no
+/// acceleration ramp. Only 0.5 mm/s, the default `STATOR_RATE_MM_S`, was
+/// measured clean (zero lost steps over some forty thousand). The bound now
+/// enforces that evidence in firmware rather than leaving it as an operator
+/// instruction in `notes.md`/`AGENTS.md`; raise it only alongside an
+/// acceleration ramp and fresh loss measurements at the higher rate.
+///
+/// A backlash allowance of more than a couple of millimetres means something
+/// mechanical is wrong rather than needing compensation.
+pub const MAX_STATOR_RATE_MM_S: f32 = 0.5;
 pub const MAX_STATOR_BACKLASH_MM: f32 = 2.0;
 
 /// Barrel reading at the opto datum, in mm. `rig_stator_datum` overrides it at

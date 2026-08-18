@@ -175,23 +175,25 @@ must be raised to `8.0` only once the strapping is confirmed by inspection.
 ### Travel and limits
 
 Measured by hand on 2026-08-17, as barrel readings, which is how
-`STATOR_TRAVEL_MIN_MM` and `STATOR_TRAVEL_MAX_MM` are configured:
+`STATOR_TRAVEL_MIN_MM` and `STATOR_TRAVEL_MAX_MM` are configured. The soft
+lower limit was widened on 2026-08-18, from one barrel turn clear of the hard
+stop to two:
 
 | | Barrel | Relative to the datum |
 |---|---|---|
 | Lower hard stop | 0.100 in, 2.540 mm | −8.07 mm |
-| Soft lower limit | 0.125 in, 3.175 mm | −7.43 mm |
+| Soft lower limit | 0.250 in, 6.35 mm | −4.26 mm |
 | **Datum** | 0.4176875 in, 10.609 mm | 0 |
 | Soft upper limit | 0.710 in, 18.034 mm | +7.43 mm |
 | Upper hard stop | 0.715 to 0.720 in | +7.55 to +7.68 mm |
 
-**The run-out is very unequal.** There is 0.635 mm below the lower soft limit
-and only 0.13 to 0.25 mm above the upper one. The upper limit sits close to its
-stop because that is where the interesting operating case lies, so approaching
-it deserves more care than the lower end until the hardware is revised to give
-more headroom. This asymmetry is why homing's final approach carries its own
-bound, `STATOR_APPROACH_MAX_MM`, a fifth of the search bound used for the
-retract.
+**The run-out is still unequal, though less so.** There is now 3.81 mm below
+the lower soft limit (was 0.635 mm) and still only 0.13 to 0.25 mm above the
+upper one. The upper limit sits close to its stop because that is where the
+interesting operating case lies, so approaching it deserves more care than the
+lower end until the hardware is revised to give more headroom. This asymmetry
+is why homing's final approach carries its own bound,
+`STATOR_APPROACH_MAX_MM`, a fifth of the search bound used for the retract.
 
 ### Datum repeatability sets the accuracy budget
 
@@ -318,8 +320,8 @@ positions the stage against the spindle. Step 3 is the only place homing
 advances blind.
 
 **The two bounds are deliberately very different, and this is the safety
-argument.** Step 1 retracts, and the lower stop has 0.635 mm of run-out sitting
-7.4 mm beyond the datum, so overshooting there is cheap and it gets the full
+argument.** Step 1 retracts, and the lower stop has 3.81 mm of run-out sitting
+4.3 mm beyond the datum, so overshooting there is cheap and it gets the full
 8 mm search. Step 3 advances toward an upper stop with only 0.13 to 0.25 mm of
 run-out, so it gets 0.4 mm: enough to undo the 0.2 mm backoff and cross the
 0.06 mm dead band with three times the margin it needs, and no more. That caps
