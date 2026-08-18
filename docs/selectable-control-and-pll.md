@@ -22,8 +22,9 @@ the rig's three control modes. It should acquire a generic, harmonic-frame-aware
 control seam with the following responsibilities:
 
 - receive the generated reference, the current harmonic frame, the measured
-  inputs, and the sample interval;
-- return a scalar controller contribution to the actuator command;
+  inputs, forcing, table value, and the sample interval;
+- return the complete raw programme output, so mode-specific composition rules
+  can be enforced rather than left to operator discipline;
 - optionally return the phase increment to use on the next tick;
 - expose fixed telemetry, a reset hook, command application, and a fault;
 - remain statically dispatched, allocation-free, and SRAM-resident; and
@@ -43,17 +44,11 @@ into the rig merely to obtain access to its private phase accumulator.
 
 The proposed `control_mode` parameter is a writable `u32` enum:
 
-| Value | Mode | Controller contribution | Master frequency |
+| Value | Mode | Raw programme output | Master frequency |
 |---:|---|---|---|
-| 0 | `None` | zero | standard `freq` parameter |
-| 1 | `Pid` | PID output from `target - laser` | standard `freq` parameter |
-| 2 | `Pll` | zero | bounded output of the PLL |
-
-The complete programme output remains
-
-```text
-out_raw = controller_contribution + forcing + table.
-```
+| 0 | `None` | `forcing + table` | standard `freq` parameter |
+| 1 | `Pid` | `PID(target - laser) + forcing + table` | standard `freq` parameter |
+| 2 | `Pll` | `forcing`; table is ignored | bounded output of the PLL |
 
 Consequently:
 
@@ -62,10 +57,11 @@ Consequently:
 - `forcing_coeffs` is always open-loop excitation in volts. It supplies the
   excitation in both `None` and `Pll` modes and remains additive feed-forward
   in PID mode.
-- `table` remains an additive voltage. A free-running table must be off in PLL
-  mode because it is not coherent with the phase detector. A table deliberately
-  locked to the master phase may be admitted later, after its effect on the
-  measured excitation reference is tested.
+- `table` remains an additive voltage in `None` and `Pid` modes. It is ignored
+  in `Pll` mode, irrespective of `table_mode`, because a second waveform path
+  must not silently invalidate the phase detector. A deliberately locked table
+  may be admitted later, after its effect on the measured excitation reference
+  is tested.
 
 This gives each source one stable unit in every mode. It deliberately does not
 preserve the present interpretation in which `PassThrough` sends `target`
@@ -89,9 +85,19 @@ Add a trait in `helic-rt`, provisionally named `StandardControl`, and make
 implementation, but the semantic contract is:
 
 ```rust
+pub struct StandardControlInputs<'a, const H: usize> {
+    pub measured: &'a [f32],
+    pub reference: f32,
+    pub reference_mean: f32,
+    pub forcing: f32,
+    pub table: f32,
+    pub frame: &'a HarmonicFrame<H>,
+    pub current_increment: u32,
+}
+
 pub struct ControlStep {
-    /// Contribution summed with forcing and table, in actuator units.
-    pub contribution: f32,
+    /// Complete raw programme output, before the rig safety gate.
+    pub output: f32,
     /// Increment for the next tick. `None` means the nominal `freq` increment,
     /// not "retain the last increment".
     pub next_increment: Option<u32>,
@@ -101,22 +107,12 @@ pub trait StandardControl<const H: usize> {
     const REFERENCE_UNIT: &'static str = "V";
     const TELEMETRY: &'static [(&'static str, &'static str)] = &[];
 
-    fn step(
-        &mut self,
-        inputs: &[f32],
-        reference: f32,
-        frame: &HarmonicFrame<H>,
-        current_increment: u32,
-        nominal_increment: u32,
-        dt: f32,
-        sample_rate: SampleRate,
-    ) -> ControlStep;
+    fn step(&mut self, inputs: StandardControlInputs<'_, H>, ctx: &StepCtx<'_>)
+        -> ControlStep;
 
     fn apply(&mut self, id: u16, payload: Payload);
     fn reset(&mut self) {}
     fn set_output_enabled(&mut self, _enabled: bool) {}
-    fn disabled_increment(&self, _nominal: u32) -> Option<u32> { None }
-    fn forcing_changed(&mut self) {}
     fn telemetry(&self, _out: &mut [f32]) {}
     fn fault(&self) -> bool { false }
 }
@@ -127,10 +123,20 @@ If it meant "retain", leaving PLL mode could silently leave the generator at
 the last locked frequency.
 
 Provide a blanket adapter from every existing `C: Controller` to
-`StandardControl<H>`. It delegates scalar controller parameters, reset,
-telemetry, and `tick`, returns no frequency override, retains `"V"` as the
-reference unit, and never faults. Existing rig type aliases and
-`ControllerGroup<C>` therefore remain valid.
+`StandardControl<H>`. It delegates reset, telemetry, and `tick`, returns
+`controller.tick(...) + forcing + table` with no frequency override, retains
+`"V"` as the reference unit, and never faults. Existing rig type aliases and
+`ControllerGroup<C>` therefore remain valid. A type must not implement both
+`Controller` and `StandardControl`; a compile fixture has verified that a
+downstream rig-local implementation does not overlap the blanket adapter.
+
+`StandardProgram::apply` retains ownership of the standard controller command
+mapping. It routes `command_id::controller::RESET` directly to `reset` and
+forwards controller ids of one and above, without subtracting one, to
+`StandardControl::apply`. The blanket adapter alone translates those forwarded
+ids to the zero-based ids expected by `Controller::set_param`. The rig group
+uses the same raw ids as its parameter definitions. Test `RESET`, the first
+ordinary parameter, and the final ordinary parameter explicitly.
 
 The selectable rig control uses a rig-specific parameter group because its
 parameters mix `u32` commands and `f32` values. The existing
@@ -144,11 +150,12 @@ Replace `StandardProgram`'s bare `PhaseAccumulator` with
 1. advance the generator once and borrow the resulting `HarmonicFrame<H>`;
 2. project `target_coeffs` and `forcing_coeffs` through that shared frame;
 3. step the table using the frame's phase and wrap flag;
-4. call the selected control policy while the frame is borrowed;
+4. call the selected control policy with the reference mean, forcing, table,
+   and frame while the frame is borrowed;
 5. record the increment which generated the current sample;
 6. release the frame borrow and install either the returned next increment or
    the nominal `freq` increment; and
-7. sum the control contribution, forcing, and table.
+7. use the complete output returned by the control policy.
 
 The returned increment takes effect on the following tick. `freq_actual`
 telemetry must likewise describe the increment which generated the phase in
@@ -163,26 +170,30 @@ authoritative.
 
 The current `Controller` documentation says reset occurs when control is
 enabled or re-armed, but `StandardProgram` cannot presently see that lifecycle.
-Extend `StepCtx` with `output_enabled`, calculated by the RT loop as:
+Keep `StepCtx` as the loop-invariant immutable services value it is today.
+Instead, the RT loop loads one `SafetyInputs` snapshot per tick, calculates
+`output_enabled` as:
 
 ```text
 not safety-gated, or (armed and not tripped).
 ```
 
-This keeps ungated rigs permanently enabled. `StandardProgram` tracks the
-previous value and:
+and passes the flag separately to `Program::step`. The same safety snapshot is
+then used by the downstream gate, so a core-0 arm change cannot land between
+two inconsistent reads. This keeps ungated rigs permanently enabled.
+`StandardProgram` tracks the previous value and:
 
 - does not advance controller or PLL state while output is disabled;
 - calls `reset` on a disabled-to-enabled transition;
 - calls `set_output_enabled` after transition handling; and
-- uses zero controller contribution while disabled.
+- uses zero raw programme output and the nominal frequency while disabled.
 
-While disabled, `StandardProgram` still installs the value returned by
-`disabled_increment`, falling back to the nominal frequency. This rig's PLL
-mode returns its centre increment, whereas the other modes and every existing
-controller return the nominal increment. Selecting PLL while disarmed therefore
-places the generator at the PLL centre before the first armed sample, without
-running the estimator or applying an output.
+On the first enabled PLL tick, the phase increment may still be the nominal
+`freq` value; the PLL centre increment takes effect on the following tick. The
+resulting one-sample phase difference is
+`(freq - pll_centre_freq) / sample_rate` turns, phase remains continuous, and
+no second increment-override path is justified to remove it. Bound and test
+this transient.
 
 The forcing and table values may still be calculated for telemetry, but the
 existing safety gate remains the sole authority which decides the applied
@@ -224,6 +235,18 @@ reports `-90 deg`, exactly matching the phase-resonance setpoint. The existing
 demodulator uses `atan2(b, a)` and consequently reports the opposite sign; its
 documentation and tests must change with the implementation.
 
+Define the loop error as
+
+```text
+phase_error = corrected_measured_phase - target_phase.
+```
+
+The usual resonance has a negative phase-frequency slope. With this error
+definition, positive `pll_kp` and `pll_ki` increase frequency when the measured
+phase lies above the target, which is the expected feedback direction. Signed
+gains remain valid for an experimentally established positive slope, but zero
+is the unevidenced default and the ordinary case uses positive gains.
+
 ### DC rejection before synchronous demodulation
 
 The laser reports an absolute distance with a large static component. Mixing
@@ -250,6 +273,15 @@ captured raw response remains authoritative.
 Resetting the PLL resets both mean estimators and seeds them afresh on the next
 valid sample. Tests must cover a response of the form
 `25 mm + small sinusoid`, non-zero excitation offset, and slow mean drift.
+
+Seeding from one sample still leaves a mean error of order the oscillation
+amplitude. After every full reset or explicit reacquisition, remain in
+`Acquiring` and mark observations invalid for at least several times
+`max(dc_time_constant, demod_time_constant)`. Use one named, tested warm-up
+factor rather than relying on `lock_dwell` to hide filter transients. The
+acquisition-timeout clock starts after warm-up, and telemetry distinguishes
+warm-up from a valid observation. This conservative rule can be relaxed only
+after simulation demonstrates an equivalent state-dependent criterion.
 
 ### Separate amplitude qualifications
 
@@ -287,13 +319,14 @@ f_command = clamp(f_unclamped, f_min, f_max)
 Use conditional-integration anti-windup: accept `i_candidate` if the command is
 not saturated or if the error drives the command back into the admissible
 window. Round to `u32` only after summing the centre, proportional, and integral
-terms. Retain a fractional remainder where needed so small integral corrections
-are not lost to phase-increment quantisation.
+terms. Do not retain the current correction remainder: the floating-point
+integrator already carries fractional information, and a remainder added to an
+absolute PI reconstruction would double-count it.
 
-The gains may be signed because the required feedback direction depends on the
-measured phase-frequency slope. Validation must reject non-finite gains. The
-sign must be established from a low-amplitude open-loop frequency sweep before
-PLL operation.
+The gains may be signed because an unusual measured phase-frequency slope may
+reverse the required direction. Validation must reject non-finite gains. The
+slope and expected positive sign must be confirmed by a low-amplitude open-loop
+frequency sweep before PLL operation.
 
 ### Frequency setpoint and bounds
 
@@ -317,6 +350,43 @@ group. A failure after a command was acknowledged indicates an internal
 contract error and must produce a programme fault rather than a panic on core
 1.
 
+### Instrumentation delay and phase compensation
+
+The excitation and response do not presently share an acquisition time base.
+The excitation reference is sampled by the AD7609, including its oversampling
+group delay. The laser is exposed and processed in the optoNCDT, transported by
+UART on core 0, and read by core 1 through a latest-value atomic which may be up
+to one sample old. These paths add a differential delay which is separate from
+the question of whether `drive` represents force.
+
+For a differential delay `tau_inst`, the raw measured phase contains a bias
+`-360 f tau_inst` degrees. Add a signed `instrument_delay_s` to the existing
+PLL and correct its measured phase by `+360 f tau_inst` before forming the
+error. This constant-delay model must be fitted over the intended frequency
+window during the open-loop commissioning sweep. If the residual is not
+consistent with a pure delay, replace it with an evidenced calibration model
+before interpreting quadrature as phase resonance. Quote the uncertainty in
+the fitted delay as the systematic phase uncertainty
+`360 f uncertainty(tau_inst)` on every backbone point.
+
+### Loop-bandwidth hierarchy
+
+Initial PI gains come from the measured phase-frequency slope and a deliberately
+quasi-static hierarchy, not from trial-and-error simulation alone. In angular
+frequency terms require
+
+```text
+omega_amplitude << omega_pll
+omega_pll << 1 / demod_time_constant << omega_carrier
+omega_pll << zeta * omega_n.
+```
+
+The host amplitude loop is at least five to ten times slower than the PLL. The
+PLL is well below both the demodulator pole and the plant's resonant settling
+rate, otherwise it acts on filter or mechanical transients as though phase were
+a static function of frequency and can false-lock. Establish candidate gains
+from this hierarchy, then test them in simulation and at low amplitude.
+
 ### Lock qualification
 
 `Locked` must mean more than small phase error. Acquisition requires all of the
@@ -324,19 +394,22 @@ following continuously for `pll_lock_dwell`:
 
 - a valid observation with both amplitudes above their thresholds;
 - absolute phase error below `pll_lock_phase_tol`; and
-- absolute frequency slew below `pll_lock_freq_rate_tol`, in Hz/s.
+- peak-to-peak unquantised frequency command over the candidate dwell below
+  `pll_lock_freq_tol`, in Hz.
 
 Any invalid sample or failed condition resets the acquisition dwell rather than
-merely pausing it. The frequency-slew calculation must account for one
-phase-increment step at the configured sample rate so an unattainable tolerance
-cannot be accepted.
+merely pausing it. Track stationarity from the floating-point PI command before
+rounding to a phase increment. If its running span exceeds the tolerance,
+restart the dwell and extrema at the current command. This measures
+"stationary for the dwell" without the 0.0149 Hz/s single-tick floor produced
+by one increment quantum at 8 kHz.
 
 Once locked, retain separate unlock tolerance and dwell hysteresis. Loss of a
 valid observation, excessive phase error, or sustained saturation enters the
-latched `LockLost` state. Add frequency-slew loss only if simulation shows that
-it discriminates genuine loss of lock without reacting to ordinary quantised
-frequency correction; it is mandatory for declaring acquisition but not yet
-established as a useful trip condition.
+latched `LockLost` state. Add loss on sustained frequency non-stationarity only
+if simulation shows that it discriminates genuine loss of lock without
+reacting to ordinary PI correction; frequency stationarity is mandatory for
+declaring acquisition but not yet established as a useful trip condition.
 
 Acquisition timeout remains non-faulting and returns to fixed operation at the
 PLL centre frequency. `LockLost`, and only `LockLost`, contributes a programme
@@ -354,10 +427,11 @@ which:
 - retains useful demodulator state unless a full `reset` was requested.
 
 Changing the target phase while PLL mode is active invokes `reacquire`
-automatically. Activating new forcing coefficients invokes the control
-policy's `forcing_changed` hook and likewise reacquires. This supports backbone
-amplitude steps and NLFRF target-phase steps without first returning to the
-centre frequency. `ctrl_reset` remains the full reset, returning to the centre
+automatically. Forcing-coefficient changes do not have a platform callback:
+sweep orchestration is host-side and explicitly pulses `pll_reacquire` after
+the complete coefficient update. This avoids surprising lock loss after an
+unrelated harmonic trim and keeps the platform control trait free of a
+rig-shaped hook. `ctrl_reset` remains the full reset, returning to the centre
 frequency and clearing filters and integrator state.
 
 ### Telemetry getters
@@ -397,15 +471,44 @@ pub struct MagnetoelasticControl<const H: usize> {
 
 Its `StandardControl` implementation declares `REFERENCE_UNIT = "mm"` and:
 
-- returns zero contribution and no frequency override in `None` mode;
-- applies the PID to `target - laser` and returns no frequency override in
-  `Pid` mode; and
-- returns zero contribution and the PLL increment in `Pll` mode.
+- returns `forcing + table` and no frequency override in `None` mode;
+- applies the PID to `target - laser`, returns
+  `pid + forcing + table`, and returns no frequency override in `Pid` mode;
+  and
+- returns `forcing`, ignores the table contribution, and returns the PLL
+  increment in `Pll` mode.
+
+The control inputs include forcing and table so PID anti-windup can use the
+remaining actuator headroom. On every PID tick set its internal output limits
+to
+
+```text
+pid_min = SAFE_OUT_MIN - forcing - table
+pid_max = SAFE_OUT_MAX - forcing - table,
+```
+
+where `SAFE_OUT_MIN` and `SAFE_OUT_MAX` are derived from the same compile-time
+DAC window used by `Rig::clamp_output`. Do not expose softer run-time PID limits
+which can disagree with the hardware decision. The downstream safety clamp
+remains the final backstop, but ordinary feed-forward saturation now freezes an
+integrator which would drive further into saturation.
 
 The PID feedback channel is fixed to the named laser input at compile time.
 Do not retain a freely writable numeric feedback index: it permits
 dimensionally invalid feedback and makes saved parameter sets dependent on
 source ordering.
+
+PID entry is also firmware-checked. On the first enabled PID tick, and on the
+first tick after activating replacement target coefficients in PID mode,
+compare the active `target_coeffs.mean` with the current laser distance. If
+their absolute difference exceeds an evidence-backed
+`PID_ENTRY_ERROR_MAX_MM`, raise a programme fault before applying output. The
+rig control can detect the latter case from the `reference_mean` input, without
+a target-specific platform callback. This turns the 25 mm absolute-laser offset
+trap into an enforced condition. A bumpless initial PID contribution is
+desirable, but it does not replace the mean check because an integral term
+would otherwise drive persistently towards a dimensionally valid but unsafe
+zero-millimetre target.
 
 The PLL response channel is likewise the laser. The excitation reference is a
 hardware decision which remains unresolved:
@@ -443,16 +546,17 @@ The proposed host-visible parameters are:
 | `pll_centre_freq` | `f32` | Hz |
 | `pll_freq_min` | `f32` | Hz |
 | `pll_freq_max` | `f32` | Hz |
-| `pll_kp` | `f32` | Hz/degree |
-| `pll_ki` | `f32` | Hz/(degree s) |
+| `pll_kp` | `f32` | Hz/degree, normally positive |
+| `pll_ki` | `f32` | Hz/(degree s), normally positive |
 | `pll_target_phase` | `f32` | degree, conventional response minus excitation |
+| `pll_delay` | `f32` | s, signed response-path minus excitation-path delay |
 | `pll_dc_tau` | `f32` | s |
 | `pll_demod_tau` | `f32` | s |
 | `pll_excitation_min` | `f32` | excitation-source unit |
 | `pll_response_min` | `f32` | mm |
 | `pll_lock_phase_tol` | `f32` | degree |
 | `pll_unlock_phase_tol` | `f32` | degree |
-| `pll_lock_freq_rate_tol` | `f32` | Hz/s |
+| `pll_lock_freq_tol` | `f32` | Hz peak-to-peak over lock dwell |
 | `pll_lock_dwell` | `f32` | s |
 | `pll_unlock_dwell` | `f32` | s |
 | `pll_acquire_timeout` | `f32` | s |
@@ -465,12 +569,19 @@ tolerance. Defaults must be identical in the core-0 shadow and the constructed
 core-1 object. PID gains default to zero. No unevidenced PLL gain or frequency
 window is made a production default merely to make acquisition appear to work.
 
-Changing mode resets both algorithms. A mode change while output is enabled
-produces a one-tick programme fault, thereby latching the existing safety trip;
-the host must explicitly re-arm. The fault pulse then clears, but the safety
-trip does not. This guarantees that a PID integrator or PLL state acquired in
-one mode cannot be carried silently into another and preserves the rule that
-only the host arms the gate.
+The core-0 group rejects `control_mode` with `BadValue` while its safety
+snapshot is armed. This makes the ordinary error synchronous and informative.
+There remains a race in which the mode write is accepted while disarmed but the
+host arms before core 1 consumes it. The RT backstop handles that case: `apply`
+sets `mode_change_pending`; `step` observes that pending change together with
+enabled output, moves it into `mode_change_fault`, and emits safe raw output;
+`Program::fault` reads the flag later in the same tick; and only the following
+`step` clears it. Test this exact apply, step, fault, gate ordering.
+
+Every accepted mode change resets both algorithms. A raced armed change
+therefore latches the safety trip and requires explicit re-arm, while an
+ordinary disarmed change does not turn routine configuration into a safety
+recovery. Only the host arms or clears the trip.
 
 ### Fixed telemetry and source budget
 
@@ -488,13 +599,24 @@ in every mode:
 | `pll_freq_actual` | Hz | current programme frequency |
 | `pll_state` | enum | current PLL state |
 
-With ten rig inputs, these eight control signals, the four standard programme
-signals, one actuator, and `cmd_epoch`, this rig uses all 24 reviewed source
-slots. No further source can be added without either removing one of these or
-deliberately changing the platform capacity. `pll_freq_actual` describes the
-frequency used for the current record. The shortened amplitude names respect
-the protocol's 15-character source-name limit; parameter names have the
-separate 23-character limit.
+Do not spend six stream slots on physically unused `adc2` to `adc7`. The ADC
+frame is still acquired in full, but `Rig::INPUTS` publishes only named,
+connected measurements. Reserve one spare physical ADC input for a measured
+exciter-current or force signal and name it when wired; this replaces a spare
+rather than growing the source table. A likely commissioned set is `coil`,
+`drive`, `current`, `laser`, and `stator`, giving five rig inputs, twelve
+programme signals, one actuator, and `cmd_epoch`: 19 of the 24 reviewed slots.
+Until `current` is physically present and calibrated, omit it rather than
+publishing a plausible zero.
+
+Keep the eight control signals coherent in the capture for initial
+commissioning. If later source pressure is real, the slowly varying amplitude
+and state views can move to typed `ExtraParam` atomics, but that is not needed
+to create room for the already anticipated current channel.
+
+`pll_freq_actual` describes the frequency used for the current record. The
+shortened amplitude names respect the protocol's 15-character source-name
+limit; parameter names have the separate 23-character limit.
 
 The authoritative applied excitation remains `out`, after the safety gate.
 Captures used as evidence include at least the excitation reference, `laser`,
@@ -507,21 +629,22 @@ disarmed. Before first entering PID mode in a session, measure the laser resting
 position and set the mean of `target_coeffs` to it while PID gains remain zero.
 A zero-mean displacement target against an absolute laser reading near 25 mm
 would otherwise command a large, dimensionally valid error as soon as non-zero
-gain is applied.
+gain is applied. The firmware entry check is authoritative; this operating
+sequence explains how to satisfy it.
 
 The normal PLL sequence is:
 
 1. establish the laser resting point and validate the chosen excitation-phase
    measurement;
 2. configure the PLL while disarmed, including a conservative frequency
-   window and small forcing amplitude;
+   window, evidenced instrumentation-delay compensation, and small forcing
+   amplitude;
 3. select PLL mode, clear diagnostics, and arm through the persistent host;
 4. observe `Acquiring`, and accept a point only after `Locked` and independent
    host settling checks;
 5. step forcing amplitude for a backbone, or target phase plus the slow outer
    amplitude loop for an NLFRF;
-6. call `pll_reacquire` when an excitation change was not automatically
-   observed by the programme; and
+6. pulse `pll_reacquire` after each completed forcing-coefficient update; and
 7. on `LockLost`, displacement trip, current excursion, or communication loss,
    remain quiet until the cause is understood, reset, and explicitly re-arm.
 
@@ -529,6 +652,14 @@ The existing per-tick voltage clamp, displacement window, laser-staleness
 guard, non-finite output guard, arm state, and communication-loss disarm remain
 downstream of the complete programme output. PLL frequency bounds supplement
 these protections but are not a substitute for output and displacement limits.
+
+`LockLost` remains a programme fault which trips the output. Near a fold, loss
+of phase lock can precede a jump to a distant, high-amplitude attractor, so
+falling back to fixed excitation while hoping the displacement window catches
+the jump is not the conservative choice. The operational cost is deliberate:
+any established-lock loss aborts an unattended sweep, leaves the output quiet,
+and requires diagnosis and explicit host re-arm. Acquisition failure before
+lock remains non-faulting at the bounded centre frequency.
 
 The firmware currently has no calibrated current safety input. Until one is
 available, the host sweep must retain its guarded, short-capture current and
@@ -544,13 +675,17 @@ Extend the existing `helic-core` tests to cover:
 - wrapping immediately either side of `-180/180 deg`;
 - a small sinusoid about a 25 mm response mean;
 - non-zero and slowly drifting means on both inputs;
+- warm-up after reset and reacquisition, including timeout starting only after
+  warm-up;
 - independent excitation and response amplitude thresholds;
+- constant instrumentation-delay compensation, sign, and uncertainty;
 - PI convergence for both signs of a monotone phase-frequency slope;
 - proportional response, integral convergence, conditional anti-windup, and
   recovery from both frequency limits;
-- phase-increment quantisation and fractional integral accumulation;
+- phase-increment quantisation while the floating-point integrator retains
+  sub-quantum corrections;
 - continuous valid dwell, with one invalid sample resetting acquisition dwell;
-- phase and frequency-stationarity lock qualification;
+- phase and unquantised frequency-span lock qualification;
 - lock/unlock hysteresis, acquisition timeout, saturation dwell, and latched
   lock loss;
 - replayed enable preserving lock and explicit reacquisition preserving the
@@ -567,9 +702,15 @@ Add host tests for:
 - leaving PLL mode restoring the standard nominal frequency;
 - no control-state evolution while output is disabled and reset on re-arm;
 - the exact output expression in all three modes;
-- mode-change trip and explicit re-arm behaviour;
+- table suppression in PLL mode;
+- residual PID output limits after forcing and table, PID anti-windup, and the
+  target-mean interlock on entry and coefficient replacement;
+- armed mode-write rejection, the arm/write race, fault-pulse ordering, and
+  explicit re-arm behaviour;
+- exact controller reset and first/last parameter-id routing;
 - parameter type, bound, cross-parameter, shadow, and command-epoch semantics;
-- fixed source names, units, ordering, and the 24-source limit; and
+- fixed source names, units, ordering, omission of unused ADC sources, and the
+  24-source limit; and
 - `Program::fault` being true only for the mode-transition pulse, internal
   contract failure, or `PllState::LockLost`.
 
@@ -584,6 +725,8 @@ simulations to establish conservative starting gains and confirm:
 - acquisition from both sides of resonance;
 - no false lock during slow frequency drift;
 - stable reacquisition following an amplitude or phase step;
+- the PI bandwidth remaining below both demodulator and mechanical settling
+  bandwidths;
 - at least a factor of five to ten between phase-loop and host amplitude-loop
   bandwidths; and
 - correct behaviour near a frequency bound and on observation loss.
@@ -611,15 +754,33 @@ On hardware, commission sequentially at the existing safe starting amplitude:
 7. record loop timing, overruns, drops, source captures, and electrical evidence
    in `notes.md`.
 
-The 8 kHz worst-case PLL path must remain below the existing 60 microsecond
-hardware regression limit with zero overruns. Software checks alone do not
-establish this.
+The 8 kHz worst-case PLL path, including command-application ticks, must remain
+below the existing 60 microsecond hardware regression limit with zero overruns.
+The former 63 to 64 microsecond command-copy cost was removed in platform
+v0.2.1; this rig subsequently measured quiet and hundreds of write ticks at
+about 44 to 45 microseconds, and v0.2.5 retains that compact command envelope.
+The 60 microsecond acceptance is therefore current and testable, not merely a
+quiet-tick limit. Software checks alone do not establish the revised PLL path.
 
 ## Delivery sequence and repository ownership
 
-1. In the HELIC-DAQ platform, introduce `StandardControl`, the existing
-   `Controller` adapter, shared-frame `StandardProgram`, output-enabled context,
-   and compatibility tests.
+This document is the cross-repository design record requested before work
+begins. Before implementation, split the normative platform half into
+HELIC-DAQ beside `docs/rt_program_proposal.md` and
+`docs/rig_decoupling_proposal.md`; retain here only the rig composition,
+parameters, source choices, safety decisions, and commissioning contract. The
+platform pull request is reviewed and merged before the rig is repinned.
+
+`Pll` does not yet have two firmware consumers, so this work does not satisfy
+the platform's usual placement test by inventing one. Revising it in place is
+nevertheless preferable because the already exported implementation and its
+tests are in `helic-core`; moving it into this rig merely to move it back on a
+second use would be churn. No second PLL implementation is created.
+
+1. In the HELIC-DAQ platform proposal and implementation, introduce
+   `StandardControl`, the existing
+   `Controller` adapter, shared-frame `StandardProgram`, coherent per-tick
+   output-enabled flag, and compatibility tests.
 2. In the same platform, revise the existing `helic_core::Pll` and its tests.
    Do not add a second PLL type.
 3. Release a platform tag. Update this repository's `Cargo.toml`, CI workflow,
@@ -632,6 +793,12 @@ establish this.
    and VCO now run in firmware while sweep orchestration remains host-side.
 6. Simulate, plot, commission on hardware, and record evidence before declaring
    PID or PLL mode verified.
+
+The platform tag also corrects two documentation debts: `Controller::reset`
+must describe the lifecycle actually implemented, and the developer guide's
+standard-signal ordering and target-unit description must reflect the new
+control-provided reference unit. Both changes are called out in the tag
+message.
 
 If the rig work must begin before the platform release, use a temporary
 `[patch.crates-io]` against the platform branch, record why it exists, and
@@ -882,3 +1049,90 @@ and both bite hard:
    after which the trait has one increment path and no rig-shaped hooks.
 4. Settle the source budget before implementation rather than after.
 5. Split the document and open the platform half upstream.
+
+## Response to review, 2026-08-18
+
+The review materially improves the design. The proposal above has been revised
+rather than leaving accepted comments as implementation folklore. Dispositions
+follow in the review's order.
+
+### Correctness gaps
+
+- **Fault-pulse ordering: accepted.** The normative sequence is now
+  `apply: pending`, `step: pending -> visible fault`, `fault: read`, and only
+  the following `step: clear`. It is the race backstop rather than the ordinary
+  mode-change path.
+- **PID anti-windup: accepted and strengthened.** The PID limit is the residual
+  actuator headroom after forcing and table, derived every tick from the
+  compile-time safe output window. This covers additive feed-forward saturation
+  which binding the PID to the full window alone would miss.
+- **Instrumentation delay: accepted.** The revised existing PLL has a signed
+  delay compensation, commissioning fits the delay over frequency, and every
+  backbone result carries its systematic phase uncertainty. This remains
+  distinct from whether the excitation channel measures force.
+- **Bandwidth hierarchy: accepted.** Gain selection now begins from the
+  demodulator, mechanical-settling, carrier, and outer-amplitude bandwidth
+  ordering and is subsequently tested by simulation.
+- **Quantised slew: accepted.** Lock qualification now uses the span of the
+  unquantised floating-point frequency command across a continuous dwell. The
+  `pll_lock_freq_rate_tol` parameter is replaced by `pll_lock_freq_tol` in Hz.
+- **DC warm-up: accepted.** Reset and reacquisition have an explicit filter
+  warm-up, observations are invalid during it, and acquisition timeout begins
+  afterwards.
+
+### Simplifications
+
+All six are accepted. The correction remainder, `forcing_changed`, and
+`disabled_increment` are removed. The control call takes one inputs struct and
+the immutable `StepCtx`; output-enabled state is a separate per-tick flag from
+one safety snapshot. `StandardProgram` retains and tests reset/id routing. The
+phase error is measured minus target, making positive gains the expected case
+for the usual negative phase-frequency slope.
+
+The simplifications reveal a cleaner output contract: the control policy
+returns the complete raw programme output rather than only a contribution.
+That lets PLL mode enforce `output = forcing` and ignore table playback without
+a rig-shaped table hook in the platform.
+
+### Safety decisions
+
+- **Mode change: revised as suggested.** Core 0 rejects an armed write
+  synchronously. The RT fault pulse covers only the arm/write race, where the
+  write was valid when accepted but output is enabled before core 1 applies it.
+- **Lock loss: trip retained and justified.** Near a fold, fixed-frequency
+  fallback can drive a jump to a remote high-amplitude attractor before the
+  displacement guard reacts. An established-lock loss therefore aborts an
+  unattended sweep and requires explicit diagnosis and re-arm. Acquisition
+  failure before lock remains non-faulting.
+
+### Firmware-enforced rules
+
+Both comments are accepted. PLL mode ignores table output in firmware. PID
+entry checks the active target mean against the live laser with an
+evidence-backed bound and faults before output if it fails. Operator prose now
+explains how to satisfy these interlocks rather than carrying the safety case.
+
+### Source budget and timing gate
+
+- **Source budget: accepted.** Unconnected ADC channels are omitted from
+  `Rig::INPUTS`, and a physical spare is reserved for a named measured-current
+  channel. The likely commissioned source set uses 19 of 24 slots, so coherent
+  PLL telemetry need not be demoted prematurely to atomics.
+- **Timing claim: corrected, not accepted.** The review cites valid measurements
+  from platform v0.1.3, but the later entry `Platform upgraded to v0.2.1` records
+  the command-envelope fix and 366 write ticks at 45 microseconds. The v0.2.3
+  regression repeated 606 writes at 45 microseconds, and this repository is now
+  pinned to v0.2.5. The 60 microsecond gate is current, includes a write phase,
+  and remains the acceptance threshold for both quiet and command ticks. The
+  proposal now states that provenance explicitly.
+
+### Repository ownership
+
+Accepted. This file remains the requested cross-repository decision record
+while the design is being settled, but its normative platform half is split
+into HELIC-DAQ before implementation and reviewed there. The rig half remains
+here. The existing PLL is revised in place despite having only one immediate
+firmware consumer because it is already an exported, tested `helic-core`
+primitive; this is avoiding relocation churn, not pretending a second consumer
+exists. The tag also fixes the `Controller::reset` lifecycle and developer-guide
+signal-unit documentation debts identified by the review.
