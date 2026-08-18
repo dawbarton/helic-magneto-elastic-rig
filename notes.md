@@ -27,13 +27,15 @@ axis has never been homed. See the standing constraints below and
 
 Exceptions, all electrical rather than real-time. The DAC output path is
 verified as it was driven before 2026-08-12, with channel A alone against a
-fixed channel C; the symmetric A/C drive that replaced it is timing-verified
-and, since 2026-08-18, confirmed at exactly double amplitude through the
-`drive` loopback, though still not independently observed on a scope with the
-exciter powered. ADC channel 0 was rewired to a stator coil (`coil`) and its
-calibration has not been established. ADC channel 1 (`drive`) is wired and
-calibrated against `out`, with the exciter unpowered; see the last three
-bring-up entries below.
+fixed channel C. The symmetric A/C drive that replaced it is timing-verified
+and confirmed through the `drive` loopback, first at exactly double amplitude
+(`out` as the per-channel offset) and then, after `out` was redefined as the
+differential command on 2026-08-18 (firmware `a1e45da`), at unity (`drive` =
+`out` to five figures) — still not independently observed on a scope with the
+exciter powered, though. ADC channel 0 was rewired to a stator coil (`coil`)
+and its calibration has not been established. ADC channel 1 (`drive`) is
+wired and calibrated against `out`, with the exciter unpowered; see the last
+four bring-up entries below.
 
 The exciter drive is only as safe as the limits in `src/config.rs`, and those
 limits are compile-time constants that describe the fitted hardware. Re-check
@@ -49,17 +51,19 @@ change of analogue board, specimen, or exciter.
 - **Analogue output stages.** The fitted cape is all-unipolar, and
   `DAC_POLARITY` in `src/rig.rs` is set to match. Channels A and C are the
   exciter's differential inputs and are driven symmetrically about the
-  2.048 V common mode (`MID_RAIL + out` on A, `MID_RAIL - out` on C). This
-  doubles the topology's achievable differential amplitude, from ±2.048 V
-  (only A varying, over its own 0-4.096 V rail, against a fixed C) to the full
-  ±4.096 V of the DAC reference; channel B is broken and channel D is unused,
-  so both rest at 0 V. Output routing is fixed to channel A and
-  `rig_out_channel` will reject any other value. The actual operating range
-  stays clamped to ±1.952 V on `out` (±3.904 V differential) by
+  2.048 V common mode. **Since 2026-08-18** (`MID_RAIL + out/2` on A,
+  `MID_RAIL - out/2` on C), so `out` is the differential command directly,
+  equal to what `drive` measures; before that date it was `MID_RAIL + out` /
+  `MID_RAIL - out`, a differential of `2 * out`. Either way channel B is
+  broken and channel D is unused, so both rest at 0 V. Output routing is
+  fixed to channel A and `rig_out_channel` will reject any other value. The
+  physical range hasn't changed, only its label: the actual operating range
+  stays clamped to ±1.952 V per channel about `MID_RAIL` by
   `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V` in `src/config.rs`, an unchanged,
-  deliberate 0.096 V headroom below each rail; only the topology ceiling
-  doubled, not that software margin. Before 2026-08-12, C was held constant at
-  `MID_RAIL` and only A varied.
+  deliberate 0.096 V headroom below each rail, which is now **±3.904 V on
+  `out`** (was ±1.952 V before 2026-08-18, since `out` used to be the
+  per-channel deviation rather than the differential). Before 2026-08-12, C
+  was held constant at `MID_RAIL` and only A varied, giving ±2.048 V.
 - **Two DAC words per tick.** Driving A and C symmetrically means `actuate`
   writes two AD5064 words per tick, and the part needs ~3 µs between
   consecutive words. A single write per tick was spaced by the tick period
@@ -82,18 +86,22 @@ change of analogue board, specimen, or exciter.
   became `drive`, and `rig-profile.toml` follows. Sources are discovered by
   name, so host code and saved captures predating this will not match on the
   old names.
-- **`drive` calibration against `out`, exciter unpowered: `drive` = 2.0000 ×
-  `out` − 0.0002 V.** Measured 2026-08-18 over an eleven-point sweep from
-  -1.9 V to +1.9 V, ADC-side, well inside the AD7609's ±10 V range even at the
-  DAC rails; residual against that fit was ≤36 µV, an order of magnitude below
-  `coil`'s own noise floor. It taps the exciter controller's input rather than
-  the DAC pins, so this is sensitive to cape changes in a way a direct DAC tap
+- **`drive` calibration against `out`, exciter unpowered: `drive` = 1.0000 ×
+  `out` − 0.0002 V**, current since firmware `a1e45da` redefined `out` as the
+  differential command (see "Analogue output stages" above). Measured
+  2026-08-18 over an eleven-point sweep from -3.8 V to +3.8 V, ADC-side, well
+  inside the AD7609's ±10 V range even at the DAC rails; residual against that
+  fit was ≤32 µV, an order of magnitude below `coil`'s own noise floor. **This
+  supersedes the 2.0000× figure measured the same day under the pre-`a1e45da`
+  mapping**, which is no longer how the firmware behaves; both are correct for
+  their own firmware. It taps the exciter controller's input rather than the
+  DAC pins, so this is sensitive to cape changes in a way a direct DAC tap
   would not be, and should be rechecked after any analogue board swap. **The
   exciter was unpowered for this measurement.** If the tap point includes an
   actively buffered input stage inside the exciter's current controller, its
   gain could differ once that controller is powered; treat the ratio as
   provisional until repeated live, ideally cross-checked against a scope on
-  channels A and C directly. See the 2026-08-18 bring-up entry below.
+  channels A and C directly. See the two 2026-08-18 bring-up entries below.
 - **The stator stage has moved, but is not calibrated or homed.** The axis was
   wired and first driven on 2026-08-14, two jogs of one revolution, and the
   firmware emitted exactly the steps it should. The direction convention and
@@ -2046,3 +2054,81 @@ had clamped earlier in the same session. Matches `RtShared`'s implementation
 (`safety_clamp_ticks`/`safety_quiet_ticks` counters) rather than being a
 surprise, but it is easy to misread a stale bit as a live condition
 mid-session; `diag_reset` clears it.
+
+## `out` redefined as the differential DAC command, platform repinned to v0.2.5, reflashed and revalidated (2026-08-18)
+
+Following on from the check above: David asked for `out = drive` rather than
+`drive = 2*out`, and to repin the platform first. Both landed in one flash,
+firmware `0.1.0 a1e45da`.
+
+### Platform repin, v0.2.4 → v0.2.5
+
+Patch bump, no public Rust API or wire-packet layout change per the tag
+message. Directly closes the gap this file raised on 2026-08-17
+(`helic-daq#3`): the compact firmware identity now appends `+` when tracked
+content differs from HEAD and `?` when cleanliness can't be established,
+instead of silently naming a commit the image wasn't built from. Embassy
+versions in the platform's `firmware/Cargo.toml` at the new tag already
+matched ours, so no transitive bump was needed. Moved in all three places
+(`Cargo.toml`, `.github/workflows/ci.yml`, `README.md`) per `AGENTS.md`, and
+`Cargo.lock` updated. Static gates pass unchanged: `cargo fmt`, clippy, both
+board builds, `helic-deps-check`, `helic-rt-layout`.
+
+### `out` = A − C directly
+
+`src/rig.rs`'s `actuate` now writes `MID_RAIL + out/2` to A and
+`MID_RAIL - out/2` to C, instead of `MID_RAIL + out` / `MID_RAIL - out`.
+`clamp_output` matches: it clamps `out/2` against `DAC_OUT_FLOOR_V`/
+`DAC_OUT_CEILING_V` and doubles the clamped half back into `out`'s own units.
+Net effect: `out`'s achievable range doubled in its own units, ±1.952 V to
+±3.904 V, for an unchanged physical DAC rail, and the differential drive
+equals `out` directly rather than `2 * out`. See the updated "Analogue output
+stages" and `drive` calibration entries in the standing constraints above.
+Static gates pass: `cargo fmt`, clippy, both board builds,
+`helic-deps-check`, `helic-rt-layout` (the tick-path SRAM-residency check,
+relevant since `actuate` and `clamp_output` both changed).
+
+Committed before flashing, as always, so the wire identity is trustworthy —
+doubly worth doing given this flash is also what first exercises the v0.2.5
+dirty-marker fix.
+
+### Reflash and hardware verification
+
+Flashed via `probe-rs run`; came up as `0.1.0 a1e45da`, matching HEAD exactly
+with no `+` suffix, confirming the tree was clean at build time (the first
+real-world exercise of the v0.2.5 identity fix). `helic-rt-regression` passed
+every phase with zero overruns, tick timeouts, dropped records, lost packets
+or index gaps, `loop_time_max` 45 µs against the 60 µs limit — unchanged from
+before this session's firmware changes, as expected: `actuate` and
+`clamp_output` only gained an `f32` multiply each.
+
+Reran the DAC sweep from earlier today (`data/dac-check-2026-08-18/
+dac_check.py`, rerun writes `dac_check_2026-08-18b.npz`/`.png`), exciter still
+unpowered, over -3.8 V to +3.8 V plus a deliberate ±10 V over-range pair:
+
+- **`drive` = 1.0000 × `out` − 0.0002 V**, residual ≤32 µV against that fit —
+  `out` and `drive` now agree to five figures, which is what was asked for.
+  This supersedes the 2.0000× figure from the pre-`a1e45da` mapping measured
+  earlier the same day; neither is wrong, they describe different firmware.
+- The clamp now lands at exactly **±3.904 V** on `out` (was ±1.952 V), as
+  `DAC_OUT_CEILING_V`/`FLOOR_V`'s doc comments predict, with the `clamped`
+  safety bit set only on the two over-range points.
+- `coil` stayed within its usual ~40 µV noise floor throughout: no crosstalk
+  introduced by the remapping.
+
+Same caveat as before carries over unchanged: **the exciter was unpowered**
+throughout, so the 1.0000× ratio is provisional until repeated live, ideally
+against a scope on channels A and C directly.
+
+### A live operational trap this creates, worth flagging now
+
+**`out`'s numeric meaning changed.** A `forcing_coeffs`/`target_coeffs` value
+that used to drive a channel close to its rail now only drives it to half
+that, and conversely a value chosen under the new convention would have
+undershot the old one by half. Nothing in this repository depends on `out`'s
+absolute scale today (`ActiveController` is `PassThrough`, and both `notes.md`
+sweeps were commanded explicitly), so the blast radius is contained, but any
+future controller gain, saved waveform, or mental "V equals volts on the
+channel" habit carried over from before 2026-08-18 will be wrong by a factor
+of two. Worth a line in `AGENTS.md` if this rig starts seeing tuned
+controller gains that depend on `out`'s scale.
