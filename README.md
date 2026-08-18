@@ -81,6 +81,11 @@ core-0 stator axis, over the PIO step generator in `src/step_pio.rs`; and
 `src/main.rs` binds interrupts, assigns tasks to cores, and composes the
 platform's runners.
 
+`docs/selectable-control-and-pll.md` proposes the platform and rig changes for
+run-time selection between no controller, PID displacement control, and
+phase-locked excitation. It includes the required in-place revision of the
+platform PLL and the commissioning evidence needed before hardware use.
+
 `ActiveController` is currently `PassThrough`, selected statically in
 `src/config.rs`. The generated target passes through the controller; forcing
 and arbitrary-table signals are then added by the common RT loop. Replace both
