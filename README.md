@@ -20,12 +20,14 @@ this repository implements.
 - AD7609 eight-channel simultaneous ADC on SPI1, true-bipolar differential
   inputs at ±10 V. PWM-driven CONVST supplies the hardware sample clock and
   the BUSY falling edge starts each RT tick. Channels 0 and 1 are named
-  physical measurements and the rest are spare:
+  physical measurements; the six unused channels are acquired but omitted
+  from the stream:
   - `coil`: a sense coil wound around the stator, measuring the specimen side.
   - `drive`: the exciter current controller's differential input, which is the
     DAC output seen through the analogue cape. It exists so the output path is
-    observable in software, but it is not calibrated against `out`; see
-    `notes.md` before using it quantitatively.
+    observable in software. Its unpowered calibration against `out` is
+    provisional; see `notes.md` before using it quantitatively or as a PLL
+    excitation reference.
 - AD5064 four-channel DAC on the same core-1 SPI bus. Channels A and C are the
   exciter's differential current-controller inputs, driven symmetrically about
   the 2.048 V common-mode point (`MID_RAIL + out/2` on A, `MID_RAIL - out/2`
@@ -74,28 +76,29 @@ analogue board and is not a free choice.
 
 `src/board.rs` is the complete pin and ownership map; `src/config.rs` holds the
 compile-time laboratory choices, including the sample rate, safety limits,
-network configuration and the active controller and programme; `src/rig.rs`
+network configuration and active programme; `src/lib.rs`, `src/control.rs`,
+`src/control_params.rs`, and `src/safety_limits.rs` hold the host-testable
+selectable policy, typed parameter group, and shared output bound; `src/rig.rs`
 assembles the core-1 hardware and implements `Rig`; `src/telemetry.rs` declares
 the atomic-backed values exposed to the host; `src/stator.rs` implements the
 core-0 stator axis, over the PIO step generator in `src/step_pio.rs`; and
 `src/main.rs` binds interrupts, assigns tasks to cores, and composes the
 platform's runners.
 
-`docs/selectable-control-and-pll.md` proposes the platform and rig changes for
-run-time selection between no controller, PID displacement control, and
-phase-locked excitation. It includes the required in-place revision of the
-platform PLL and the commissioning evidence needed before hardware use.
-
-`ActiveController` is currently `PassThrough`, selected statically in
-`src/config.rs`. The generated target passes through the controller; forcing
-and arbitrary-table signals are then added by the common RT loop. Replace both
-`ActiveController` and `make_controller()` to use another controller.
+`docs/selectable-control-and-pll.md` is the reviewed design record;
+`docs/control.md` is the implemented parameter, signal, and operating contract.
+The firmware selects at run time between open-loop forcing plus table, PID
+displacement feedback plus feed-forward, and phase-locked forcing with table
+suppressed. PID and PLL hardware use remain inhibited or inert until the
+commissioning evidence listed there is recorded.
 
 ## Building and checking
 
 ```sh
 cargo build --release                       # firmware, thumbv8m.main-none-eabihf
 cargo run --release                         # flash via probe-rs
+cargo test --lib --no-default-features \
+  --target x86_64-unknown-linux-gnu          # host control/parameter tests
 ```
 
 The verification gates come from the platform's host package, pinned to the
@@ -121,3 +124,8 @@ the rig or its hot-path boundary changes.
 
 Software checks establish neither electrical nor real-time behaviour. Record
 hardware evidence in `notes.md`, and consult it before relying on a path.
+
+Until platform 0.3.0 is released, `Cargo.toml` contains a documented
+`[patch]` to the sibling `../helic-daq` checkout. A standalone clone therefore
+requires that sibling checkout. Remove the patch, and repin the crate tags, CI
+gate, and installation command together, after release.

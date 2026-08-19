@@ -12,10 +12,13 @@ repository and describes this rig under its former firmware name.
 
 ## Verification status
 
-**Hardware-verified**, on a W5500-EVB-Pico2 with the interim analogue cape:
-the 8 kHz hardware-clocked acquisition path, the DAC output path, networking,
-discovery, the parameter registry, and UDP streaming of all 15 sources. The
-figures under "Bring-up evidence" below are the current acceptance record.
+**Hardware-verified through the pre-selectable-control firmware**, on a
+W5500-EVB-Pico2 with the interim analogue cape: the 8 kHz hardware-clocked
+acquisition path, the DAC output path, networking, discovery, the parameter
+registry, and UDP streaming of the former 15-source table. The selectable
+control build changes the source table and tick path and is software-verified
+only; the 2026-08-19 entry records that boundary. The figures under "Bring-up
+evidence" below remain the latest hardware acceptance record.
 
 The stator stage is only partly covered. It was wired and first driven on
 2026-08-14: the firmware's step generation, command surface, and telemetry are
@@ -37,10 +40,10 @@ and its calibration has not been established. ADC channel 1 (`drive`) is
 wired and calibrated against `out`, with the exciter unpowered; see the last
 four bring-up entries below.
 
-The exciter drive is only as safe as the limits in `src/config.rs`, and those
-limits are compile-time constants that describe the fitted hardware. Re-check
-them, and `DAC_POLARITY` in `src/rig.rs`, against the hardware before every
-change of analogue board, specimen, or exciter.
+The exciter drive is only as safe as the limits in `src/safety_limits.rs` and
+`src/config.rs`, and those limits are compile-time constants that describe the
+fitted hardware. Re-check them, and `DAC_POLARITY` in `src/rig.rs`, against the
+hardware before every change of analogue board, specimen, or exciter.
 
 ## Standing hardware constraints
 
@@ -59,7 +62,7 @@ change of analogue board, specimen, or exciter.
   fixed to channel A and `rig_out_channel` will reject any other value. The
   physical range hasn't changed, only its label: the actual operating range
   stays clamped to ±1.952 V per channel about `MID_RAIL` by
-  `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V` in `src/config.rs`, an unchanged,
+  `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V` in `src/safety_limits.rs`, an unchanged,
   deliberate 0.096 V headroom below each rail, which is now **±3.904 V on
   `out`** (was ±1.952 V before 2026-08-18, since `out` used to be the
   per-channel deviation rather than the differential). Before 2026-08-12, C
@@ -73,8 +76,9 @@ change of analogue board, specimen, or exciter.
   with an `embassy-time` delay: the tick path is Embassy-free and
   SRAM-resident.
 - **ADC channel map, and a rename.** AD7609 channels 0 and 1 are named
-  sources; 2-7 are spare and keep generic `adc2`-`adc7` names. Both named
-  channels use the AD7609's true-bipolar differential inputs.
+  sources; 2-7 remain physically spare but are omitted from the current stream
+  table. The converter still acquires all eight channels synchronously. Both
+  named channels use the AD7609's true-bipolar differential inputs.
   - `coil` (channel 0) is a sense coil wound around the stator. Before
     2026-08-12 this channel was the actuator controller's current-sense
     output, so captures from before that date hold current, not coil voltage,
@@ -82,10 +86,11 @@ change of analogue board, specimen, or exciter.
   - `drive` (channel 1) is the exciter current controller's differential
     input. Declared in firmware on 2026-08-12; wired on 2026-08-18 and
     calibrated against `out` the same day, with the exciter unpowered.
-  The wire-visible names changed with this: `adc0` became `coil` and `adc1`
-  became `drive`, and `rig-profile.toml` follows. Sources are discovered by
-  name, so host code and saved captures predating this will not match on the
-  old names.
+  The wire-visible names changed with this: `adc0` became `coil`, `adc1`
+  became `drive`, and the later selectable-control build removed `adc2` to
+  `adc7`; `rig-profile.toml` follows. Sources are discovered by name, so host
+  code and saved captures predating either change will not match the current
+  table.
 - **`drive` calibration against `out`, exciter unpowered: `drive` = 1.0000 ×
   `out` − 0.0002 V**, current since firmware `a1e45da` redefined `out` as the
   differential command (see "Analogue output stages" above). Measured
@@ -2165,3 +2170,39 @@ that requires homing first (the soft window is enforced only once homed) and
 homing was out of scope for this change. Worth doing before the lower limit
 is trusted operationally, alongside the barrel-by-eye check still outstanding
 from the homing commissioning entry above.
+
+## 2026-08-19T11:38+00:00 Selectable control implemented, hardware enablement blocked on evidence
+
+- The firmware now has run-time `None`, PID, and PLL modes through the
+  platform's breaking `StandardControl` API. The existing platform `Pll` was
+  revised in place. Host tests cover composition, typed command routing,
+  frequency-window invariants, mode-change races, phase convention, DC
+  rejection, warm-up, stationarity, anti-windup, delay wrapping, and latched
+  lock loss.
+- Unused ADC channels 2 to 7 are no longer streamed. The hardware still
+  acquires the complete AD7609 frame; the compact input order is now `coil`,
+  `drive`, `laser`, `stator`. This leaves six stream slots free, including one
+  for a measured exciter-current or force channel when it is physically wired.
+- **PID output is deliberately inhibited pending measurement.** This file has
+  no evidence for a quiescent laser peak-to-peak limit or an acceptable error
+  between target mean and resting laser mean. `PID_ENTRY_LIMITS_VERIFIED`
+  therefore remains false, and PID entry faults after its 0.25 s observation
+  window rather than energising with invented limits. Measure both quantities,
+  choose conservative `PID_ENTRY_QUIET_MM` and `PID_ENTRY_ERROR_MAX_MM`, and
+  record the data here before setting the flag true.
+- **PLL defaults are deliberately inert:** zero proportional and integral
+  gains, and a zero-width frequency window. `drive` is currently the phase
+  detector's excitation input, but its 1.0000× calibration was measured with
+  the exciter unpowered and it is not measured force. Before scientific PLL
+  use, measure the powered drive-to-force/current phase transfer, fit
+  `pll_delay_s`, establish the open-loop phase-frequency slope and safe
+  frequency window, and then tune the loop below both demodulator and plant
+  settling bandwidths.
+- The release ELF initially exposed a flash-resident `libm::sqrtf` call from
+  the PLL telemetry path. It was replaced with a tested SRAM-resident `f32`
+  square root; the named hot symbols now lie in the executable SRAM section.
+- Software completion is against a temporary sibling-checkout Cargo patch to
+  unreleased platform 0.3.0. Remove it only after all platform crates, CI gate,
+  and README installation command can be repinned together to the release tag.
+  No hardware timing, electrical, PID, or PLL acceptance is claimed by this
+  entry.

@@ -2,11 +2,15 @@
 
 ## Status and scope
 
-This document proposes a run-time choice between no feedback controller, PID
+This document is the reviewed design record for the implemented run-time
+choice between no feedback controller, PID
 displacement control, and phase-locked excitation for the magneto-elastic rig.
 It covers the required changes to the HELIC-DAQ platform and this rig, including
 an in-place revision of `helic_core::Pll`. It does not specify numerical gains
-or operating bounds. Those require simulation and hardware evidence.
+or operating bounds. Those require simulation and hardware evidence. The
+software implementation is present locally against unreleased platform 0.3.0;
+`docs/control.md` states the resulting operator contract and the deliberate
+PID/PLL commissioning blockers.
 
 The phase-locked use case is the backbone and nonlinear frequency-response
 method described by the CBC Duffing project's `docs/methods/phase-locked-loop.md`:
