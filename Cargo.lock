@@ -840,6 +840,7 @@ dependencies = [
 [[package]]
 name = "helic-core"
 version = "0.3.0"
+source = "git+https://github.com/dawbarton/helic-daq?tag=v0.3.0#3dbe99619c3066e8a24e75b46b99e7e68acef566"
 dependencies = [
  "libm",
 ]
@@ -847,6 +848,7 @@ dependencies = [
 [[package]]
 name = "helic-drivers"
 version = "0.3.0"
+source = "git+https://github.com/dawbarton/helic-daq?tag=v0.3.0#3dbe99619c3066e8a24e75b46b99e7e68acef566"
 dependencies = [
  "embedded-hal 1.0.0",
 ]
@@ -854,10 +856,12 @@ dependencies = [
 [[package]]
 name = "helic-fw-build"
 version = "0.3.0"
+source = "git+https://github.com/dawbarton/helic-daq?tag=v0.3.0#3dbe99619c3066e8a24e75b46b99e7e68acef566"
 
 [[package]]
 name = "helic-fw-optoncdt"
 version = "0.3.0"
+source = "git+https://github.com/dawbarton/helic-daq?tag=v0.3.0#3dbe99619c3066e8a24e75b46b99e7e68acef566"
 dependencies = [
  "defmt 1.1.1",
  "embassy-rp",
@@ -869,6 +873,7 @@ dependencies = [
 [[package]]
 name = "helic-fw-rt"
 version = "0.3.0"
+source = "git+https://github.com/dawbarton/helic-daq?tag=v0.3.0#3dbe99619c3066e8a24e75b46b99e7e68acef566"
 dependencies = [
  "defmt 1.1.1",
  "embassy-rp",
@@ -884,6 +889,7 @@ dependencies = [
 [[package]]
 name = "helic-fw-support"
 version = "0.3.0"
+source = "git+https://github.com/dawbarton/helic-daq?tag=v0.3.0#3dbe99619c3066e8a24e75b46b99e7e68acef566"
 dependencies = [
  "defmt 1.1.1",
  "embassy-executor",
@@ -903,10 +909,12 @@ dependencies = [
 [[package]]
 name = "helic-proto"
 version = "0.3.0"
+source = "git+https://github.com/dawbarton/helic-daq?tag=v0.3.0#3dbe99619c3066e8a24e75b46b99e7e68acef566"
 
 [[package]]
 name = "helic-rt"
 version = "0.3.0"
+source = "git+https://github.com/dawbarton/helic-daq?tag=v0.3.0#3dbe99619c3066e8a24e75b46b99e7e68acef566"
 dependencies = [
  "heapless",
  "helic-core",

@@ -73,14 +73,14 @@ required-features = ["firmware"]
 # Platform crates, pinned to one HELIC-DAQ release. Upgrading is a deliberate
 # edit: read the tag message for consumer-visible changes first.
 [workspace.dependencies]
-helic-core = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
-helic-drivers = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
-helic-proto = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
-helic-rt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
-helic-fw-build = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
-helic-fw-optoncdt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
-helic-fw-rt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5", features = ["rt-sram"] }
-helic-fw-support = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5", default-features = false }
+helic-core = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.3.0" }
+helic-drivers = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.3.0" }
+helic-proto = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.3.0" }
+helic-rt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.3.0" }
+helic-fw-build = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.3.0" }
+helic-fw-optoncdt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.3.0" }
+helic-fw-rt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.3.0", features = ["rt-sram"] }
+helic-fw-support = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.3.0", default-features = false }
 
 # Embassy versions must match those the pinned platform crates were built
 # against (`firmware/Cargo.toml` at that tag). A mismatch presents as type
@@ -97,19 +97,6 @@ embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime
 fixed = "1.31.0"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 static_cell = "2.1.1"
-
-# Temporary development patch while the breaking StandardControl/PLL platform
-# change is reviewed and released. Remove this whole section when repinning
-# all three release references to the resulting tag.
-[patch."https://github.com/dawbarton/helic-daq"]
-helic-core = { path = "../helic-daq/helic-core" }
-helic-drivers = { path = "../helic-daq/helic-drivers" }
-helic-proto = { path = "../helic-daq/helic-proto" }
-helic-rt = { path = "../helic-daq/helic-rt" }
-helic-fw-build = { path = "../helic-daq/firmware/build" }
-helic-fw-optoncdt = { path = "../helic-daq/firmware/integrations/optoncdt" }
-helic-fw-rt = { path = "../helic-daq/firmware/rt" }
-helic-fw-support = { path = "../helic-daq/firmware/support" }
 
 [profile.release]
 debug = 2

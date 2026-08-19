@@ -108,7 +108,7 @@ The verification gates come from the platform's host package, pinned to the
 same tag as the crates, and are installed rather than copied:
 
 ```sh
-pip install "helic-daq @ git+https://github.com/dawbarton/helic-daq@v0.2.5#subdirectory=host-python"
+pip install "helic-daq @ git+https://github.com/dawbarton/helic-daq@v0.3.0#subdirectory=host-python"
 
 cargo fmt --all -- --check
 cargo clippy --release --workspace -- -D warnings
@@ -127,8 +127,3 @@ the rig or its hot-path boundary changes.
 
 Software checks establish neither electrical nor real-time behaviour. Record
 hardware evidence in `notes.md`, and consult it before relying on a path.
-
-Until platform 0.3.0 is released, `Cargo.toml` contains a documented
-`[patch]` to the sibling `../helic-daq` checkout. A standalone clone therefore
-requires that sibling checkout. Remove the patch, and repin the crate tags, CI
-gate, and installation command together, after release.

@@ -2230,3 +2230,19 @@ patch. After the platform v0.3.0 tag exists, remove the patch and change the
 eight crate tags, `HELIC_DAQ_TAG` in CI, and the README host-tool install
 reference together; then regenerate `Cargo.lock` and repeat these software
 gates before any rig release.
+
+## 2026-08-19T14:12+00:00 Platform v0.3.0 published and the rig repinned
+
+- HELIC-DAQ v0.3.0 was published from commit `3dbe996` after all five platform
+  CI jobs passed, including MATLAB. This rig now pins that immutable tag in all
+  eight crate dependencies, the CI verification-tool install, and the README
+  install command. The temporary sibling-checkout patch is removed, and
+  `Cargo.lock` resolves every HELIC crate from `v0.3.0#3dbe996`.
+- The complete software gate passed against the published tag: formatting,
+  release clippy with warnings denied, nine host control/parameter tests,
+  default W5500 and explicit W6100 release builds, the dependency policy, and
+  the `magnetoelastic` SRAM layout profile on a rebuilt default W5500 ELF. The
+  verification tools themselves were installed from the v0.3.0 host package.
+- No firmware was flashed and the rig was not energised. The PID entry limits,
+  PLL force/current transfer, delay calibration, loop tuning, and hardware
+  timing blockers recorded above remain unchanged.
