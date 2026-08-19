@@ -1136,3 +1136,221 @@ firmware consumer because it is already an exported, tested `helic-core`
 primitive; this is avoiding relocation churn, not pretending a second consumer
 exists. The tag also fixes the `Controller::reset` lifecycle and developer-guide
 signal-unit documentation debts identified by the review.
+
+## Second review, 2026-08-19
+
+Read against the same pinned tag, with the platform working tree confirmed
+identical to `v0.2.5`. This pass checks the revised proposal, so it does not
+repeat the first review's accepted points. It assumes what the first review
+did not: that this is the only rig with a controller, that breaking platform
+changes are therefore free, and that a compatibility layer has to earn its
+place like any other code.
+
+The revision holds up. The composition contract is better than the original,
+the fault-pulse ordering matches what `run_rt_tick` actually does, and the
+timing correction is right where the first review was wrong. Five things are
+wrong or dangerous rather than merely improvable, and one large simplification
+is still on the table.
+
+### Verified against the code, so it need not be rechecked
+
+- **The fault-pulse ordering is implementable as written.** `run_rt_tick`
+  applies commands, calls `step_program`, then evaluates `program_fault` as an
+  argument to `safety_gate`, then actuates. `apply` sets pending, `step`
+  publishes, `fault` reads, and the following `step` clears is exactly right
+  for that sequence.
+- **The timing correction is sound and the first review's figure was stale.**
+  `notes.md` records the 63 to 64 microsecond command-copy cost at v0.1.3 and
+  44 to 45 microseconds since v0.2.1, including write phases of 366, 606, and
+  630 writes, against the profile's 60 microsecond limit.
+- **`Pll`, `HarmonicFrame`, and `HarmonicGenerator` are exported from
+  `helic-core/src/lib.rs` and used by nothing else in the workspace.** This
+  work is their first consumer.
+- **The sine and cosine saving is real.** `FourierCoeffs::evaluate` walks all
+  `K` harmonics unconditionally, so target and forcing cost 64 lookups per tick
+  at `HARMONICS = 16` against 32 for one shared frame.
+- **The source and name budgets are right.** `MAX_SOURCES = 24`,
+  `MAX_NAME_LEN = 15`, `MAX_PARAM_NAME_LEN = 23`. The commissioned set of five
+  inputs, twelve programme signals, one actuator, and `cmd_epoch` is 19 of 24.
+  `pll_freq_actual` and `pll_phase_error` are exactly 15; the longest parameter
+  name, `pll_saturation_dwell`, is 20.
+- **The phase convention is self-consistent.** With the demodulator's
+  `2 x cos` and `2 x sin` estimates standing for `a` and `b`, an excitation of
+  `cos(theta)` and a response lagging it by 90 degrees give
+  `atan2(-b, a)` of 0 and -90 degrees respectively, so the measured phase is
+  -90 degrees as claimed, and `measured - target` with a negative
+  phase-frequency slope does need positive gains.
+
+### Correctness
+
+**`control_mode` is placed on a reserved command id.** `ParamStore::finish_staged`
+uses the group-local parameter id verbatim as the `RtCommand` id, and
+`command_id::controller::RESET` is 0. The proposal's own routing rule keeps
+`StandardProgram::apply` intercepting id 0 and forwarding ids of one and above,
+yet its parameter table lists `control_mode` first and `ctrl_reset` second.
+Mode writes would therefore be acknowledged by core 0 and either swallowed as a
+reset or, because the payload is `U32` rather than `Unit`, dropped by the
+catch-all arm. The mode would never change and nothing would say so. Reorder so
+`ctrl_reset` is id 0, or remove the reserved id entirely by taking the
+simplification below.
+
+**The residual PID limits can panic core 1.** The proposal sets
+`pid_max = SAFE_OUT_MAX - forcing - table` and `pid_min = SAFE_OUT_MIN - forcing - table`
+every tick, and `Pid::update` calls `unclamped.clamp(c.out_min, c.out_max)`.
+`f32::clamp` panics when `min > max`. `GeneratorGroup::stage` validates
+`forcing_coeffs` for finiteness alone, and `TableGroup` validates `table_gain`
+the same way, so a host write of a large forcing mean inverts the window on the
+next tick and kills the firmware. Clamp the residual window so it always
+contains zero:
+
+```text
+pid_max = (SAFE_OUT_MAX - forcing - table).max(0.0)
+pid_min = (SAFE_OUT_MIN - forcing - table).min(0.0)
+```
+
+Test feed-forward beyond the window in both directions. `SAFE_OUT_MIN` and
+`SAFE_OUT_MAX` must be one definition shared with `Rig::clamp_output`, not a
+second derivation from `DAC_OUT_FLOOR_V` and `DAC_OUT_CEILING_V` that can drift
+away from it. `FourierCoeffs::amplitude_bound` already exists and is unused; a
+core-0 rejection of coefficient sets whose bound exceeds the window is worth
+considering as defence in depth, but it does not replace the core-1 fix,
+because the table contributes to the same sum.
+
+**An absolute `f32` frequency carries no sub-quantum information in this rig's
+operating band.** The proposal drops the correction remainder on the grounds
+that "the floating-point integrator already carries fractional information".
+That is false as stated. At 8 kHz, `increment = f * 2^32 / 8000`, so one f32
+ulp equals one increment quantum at `2^23` increments, which is `f_s / 512`,
+that is **15.625 Hz**, and two quanta from 31.25 to 62.5 Hz. Holding the
+command in hertz instead is identical: the f32 ulp at 30 Hz is 1.91 microhertz
+against a 1.86 microhertz quantum. An absolute f32 PI command is therefore
+coarser than the `u32` it rounds to, throughout the intended band.
+
+The conclusion survives, the representation does not. Hold the PI state as a
+correction relative to the `u32` centre rather than as an absolute frequency:
+
+```text
+i += Ki * phase_error * dt
+correction = Kp * phase_error + i
+command = clamp(centre + round(correction), min, max)
+```
+
+At a correction of a few hertz the f32 ulp is about an eighth of a quantum, so
+the integrator does then carry what the argument claims. The reconstruction is
+still absolute each tick, so the remainder still goes, and the lock-stationarity
+span is still read from the unquantised correction. Add a test that a
+sub-quantum integral accumulates to a whole quantum, at a carrier well above
+15.625 Hz, so the property is pinned rather than assumed.
+
+**Instrumentation-delay compensation can exceed one wrap.** `wrap_degrees` is a
+two-branch plus or minus 360 adjustment. That is sound for `measured - target`,
+where both operands lie in `[-180, 180)` and the raw difference cannot leave
+`(-360, 360)`. It is not sound for `+360 f tau_inst`, which at 30 Hz and 40
+milliseconds is 432 degrees, leaving the corrected phase outside the range and
+the error wrong by a whole turn. Either reduce the corrected phase with a full
+modulo, which is two lines, or bound `pll_delay` at the parameter group so that
+`360 f_max |tau| < 180` and say so beside the parameter. The first costs
+nothing in operating window and should be preferred.
+
+**The output-enabled flag lags a rig fault by one tick.** `output_enabled` is
+derived from the safety snapshot, but the gate also quiets on
+`Rig::output_fault` and `Program::fault`, both evaluated after `step`. On the
+tick a laser-staleness or displacement excursion first appears, the control
+still advances against an output that is in fact zero; the trip latches and the
+flag is correct from the next tick onwards. One tick is acceptable and no second
+mechanism is justified, but say it, because "does not advance controller or PLL
+state while output is disabled" currently reads as an invariant and is not one.
+
+### The simplification still on the table
+
+**Delete `Controller` rather than adapting it.** The proposal treats "adapt
+every existing `Controller` without changing its enabled-path behaviour" as a
+requirement, and the first review verified that the blanket adapter compiles.
+Both are true; neither establishes that the adapter should exist. Its standing
+cost is two traits with the same job, a coherence rule that no type may
+implement both and which is invisible until the day it bites, an id offset that
+exists in one path and not the other, and a reserved id 0 whose only remaining
+purpose is to serve the adapter. It buys compatibility for `PassThrough` and
+`PidController`, which are about thirty and seventy lines, in a workspace with
+one rig that uses a controller.
+
+Port both to `StandardControl`, make `ControllerGroup<C: StandardControl>`, and
+let `StandardProgram::apply` forward every `DOMAIN_CONTROLLER` command verbatim
+with no reserved id and no offset. The control then owns its whole id space,
+the `control_mode` collision above cannot exist, the "first and last parameter
+id" routing test becomes unnecessary, and the sample-for-sample compatibility
+tests reduce to ordinary tests of two small controllers. `PidController`'s
+freely writable `ctrl_feedback`, which this proposal already rejects for the
+rig, goes at the same time.
+
+If the adapter is kept anyway, the reason should be recorded, because the
+document's own framing does not supply one.
+
+### Specification gaps
+
+- **`LockLost` has no stated exit.** `reacquire` is specified to enter
+  `Acquiring` from `Locked` or `Fixed`, so the only ways out are `ctrl_reset`
+  and a mode change. That is the right choice and should be written down: the
+  operating sequence says "reset, and explicitly re-arm", and an operator who
+  re-arms without resetting first will find `Program::fault` still true and the
+  trip re-latched on the next tick.
+- **`Program::INPUTS_REQUIRED` is the platform's mechanism for exactly this
+  binding and the proposal does not use it.** The control indexes a fixed laser
+  slot, and this proposal renumbers the inputs by dropping `adc2` to `adc7`,
+  moving `LASER_INPUT` from 8 to 2. Forward `C::INPUTS_REQUIRED` through
+  `StandardProgram` so `validate_sources` refuses a rig whose input table no
+  longer reaches the channel the control reads.
+- **Dropping the spare ADC sources is a change to `measure`, not only to
+  `INPUTS`.** `measure` currently writes `values[..8]` from the decoded frame
+  and reaches the laser and stator at fixed indices 8 and 9. Both the slice and
+  the two index constants move with the source table.
+- **The PID entry check compares a mean against an instantaneous sample.**
+  `|target_coeffs.mean - laser|` uses the live reading, which under oscillation
+  departs from its own mean by the response amplitude, so
+  `PID_ENTRY_ERROR_MAX_MM` has to exceed that amplitude and the check is
+  weakened exactly where it is doing the safety work. Either require entry from
+  quiescence and say so, or compare against a short-window laser mean; the DC
+  estimator specified for the PLL is the same filter.
+- **Say what the `table` signal means in `Pll` mode.** The control policy now
+  owns composition, so a PLL capture publishes a `table` value that was never
+  added to `out`. State it in the source table, or the first person to read such
+  a capture will believe the table contributed.
+- **Say that the generator and table player still advance while output is
+  disabled**, since the control does not. Otherwise the `phase` signal's
+  meaning while disarmed is undefined.
+
+### Smaller points
+
+- **Keep the amplitude qualification squared.** The demodulator currently
+  compares `a^2 + b^2` against `min^2` and never takes a root. Returning both
+  amplitudes costs two `sqrtf` per tick, which the M33's FPU affords, but
+  compute them for telemetry only and leave the threshold test as it is.
+- **Justify `reference_mean` where `forcing_changed` was rejected.** It is a
+  field in a platform trait that exists for one rig's interlock, which is the
+  category the first review pruned. It is more defensible, because the DC
+  component of the reference is a generic property of the generator rather than
+  a rig-shaped callback, and it is free. Keep it, and say that, or the exclusion
+  of the other reads as inconsistent.
+- **The `helic-core` placement argument is stronger than the document makes
+  it.** The developer guide's rule is two actual consumers **or** deliberate
+  acceptance as a platform primitive. `Pll` is already exported, tested, and
+  documented as one, so the second clause applies on its own; the churn argument
+  supports it rather than carrying it.
+- **Quote the timing headroom, not only the limit.** 44 to 45 microseconds
+  measured against 60 leaves about 15 microseconds, roughly 2250 cycles at
+  150 MHz, for the whole PLL path, against which the shared frame returns 32 LUT
+  lookups. A stated budget fails informatively; a pass/fail assertion does not.
+- **`pll_delay` and `instrument_delay_s` are the same quantity under two
+  names.** Pick one and use it in both halves of the document.
+
+### Suggested order of work
+
+1. Decide the `Controller` question first, because the id-space and test
+   consequences of the collision, the routing rule, and the compatibility tests
+   all follow from it.
+2. The three that are defects rather than shape: the residual-limit panic, the
+   correction-relative PI representation, and the delay-compensation wrap.
+3. The specification gaps, all of which are sentences in this document rather
+   than code.
+4. Split the platform half upstream, as already agreed, with the revised
+   routing rule in it.
