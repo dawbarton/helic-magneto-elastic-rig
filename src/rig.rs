@@ -34,13 +34,13 @@ use crate::config::{
     STATOR_BACKLASH_MM as DEFAULT_STATOR_BACKLASH_MM, STATOR_DATUM_MM as DEFAULT_STATOR_DATUM_MM,
     STATOR_HOLD_DEFAULT, STATOR_RATE_MM_S as DEFAULT_STATOR_RATE_MM_S, STATOR_SEEK_MAX_MM,
 };
-use crate::safety_limits::{DAC_VREF, MID_RAIL, SAFE_OUT_MAX_V, SAFE_OUT_MIN_V};
 use crate::stator::{issue_command, CMD_HOME, CMD_JOG, CMD_MOVE, CMD_STOP};
 use crate::telemetry::{
     LASER_FRAMES_RECEIVED, LASER_RANGE_MM, LASER_VALUE, STATOR_BACKLASH_MM, STATOR_DATUM_MM,
     STATOR_HOLD, STATOR_JOG_MM, STATOR_POSITION_MM, STATOR_RATE_MM_S, STATOR_TARGET_MM,
 };
 use fw_magnetoelastic_rig::control::{LASER_INPUT, STATOR_INPUT};
+use fw_magnetoelastic_rig::safety_limits::{DAC_VREF, MID_RAIL, SAFE_OUT_MAX_V, SAFE_OUT_MIN_V};
 
 /// DAC channel wired to the negative differential input of the exciter
 /// current controller (AD5064 channel C). Driven symmetrically with the
