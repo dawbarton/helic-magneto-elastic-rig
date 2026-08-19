@@ -27,9 +27,8 @@ control seam with the following responsibilities:
   can be enforced rather than left to operator discipline;
 - optionally return the phase increment to use on the next tick;
 - expose fixed telemetry, a reset hook, command application, and a fault;
-- remain statically dispatched, allocation-free, and SRAM-resident; and
-- adapt every existing `Controller` without changing its enabled-path
-  behaviour or public configuration.
+- declare its minimum measured-input count; and
+- remain statically dispatched, allocation-free, and SRAM-resident.
 
 The selectable policy is specific to this rig and belongs here. The underlying
 PID and PLL remain reusable primitives in `helic-core`. In particular, the
@@ -104,6 +103,7 @@ pub struct ControlStep {
 }
 
 pub trait StandardControl<const H: usize> {
+    const INPUTS_REQUIRED: usize = 0;
     const REFERENCE_UNIT: &'static str = "V";
     const TELEMETRY: &'static [(&'static str, &'static str)] = &[];
 
@@ -115,6 +115,15 @@ pub trait StandardControl<const H: usize> {
     fn set_output_enabled(&mut self, _enabled: bool) {}
     fn telemetry(&self, _out: &mut [f32]) {}
     fn fault(&self) -> bool { false }
+
+    // Optional core-0 metadata used only by the simple all-f32 group.
+    fn scalar_param_names() -> &'static [&'static str] { &[] }
+    fn scalar_param_value(&self, _id: u16) -> Option<f32> { None }
+    fn normalise_scalar_param(
+        _id: u16,
+        _value: f32,
+        _input_count: usize,
+    ) -> Option<f32> { None }
 }
 ```
 
@@ -122,25 +131,44 @@ pub trait StandardControl<const H: usize> {
 If it meant "retain", leaving PLL mode could silently leave the generator at
 the last locked frequency.
 
-Provide a blanket adapter from every existing `C: Controller` to
-`StandardControl<H>`. It delegates reset, telemetry, and `tick`, returns
-`controller.tick(...) + forcing + table` with no frequency override, retains
-`"V"` as the reference unit, and never faults. Existing rig type aliases and
-`ControllerGroup<C>` therefore remain valid. A type must not implement both
-`Controller` and `StandardControl`; a compile fixture has verified that a
-downstream rig-local implementation does not overlap the blanket adapter.
+`reference_mean` is retained deliberately. Unlike the rejected
+`forcing_changed` callback, it is a generic, already-computed property of every
+Fourier reference. It lets a control validate an absolute reference without
+reaching into the generator or adding a rig-shaped event to the platform.
 
-`StandardProgram::apply` retains ownership of the standard controller command
-mapping. It routes `command_id::controller::RESET` directly to `reset` and
-forwards controller ids of one and above, without subtracting one, to
-`StandardControl::apply`. The blanket adapter alone translates those forwarded
-ids to the zero-based ids expected by `Controller::set_param`. The rig group
-uses the same raw ids as its parameter definitions. Test `RESET`, the first
-ordinary parameter, and the final ordinary parameter explicitly.
+Delete the old `helic_core::Controller` trait rather than adapting it. Move or
+rewrite `PassThrough` and `PidController` where they can implement
+`StandardControl` directly; the numerical `Pid` primitive remains in
+`helic-core`. `PassThrough` returns `reference + forcing + table` with no
+frequency override. `PidController<const FEEDBACK: usize>` returns
+`pid + forcing + table`, fixes its feedback input in its type, and drops the
+writable `ctrl_feedback` index. It declares the corresponding
+`INPUTS_REQUIRED`. These are intentional breaking changes: this rig is the
+only controller consumer, and retaining two traits, an overlap rule, and an id
+translation has no second user to justify them.
 
-The selectable rig control uses a rig-specific parameter group because its
-parameters mix `u32` commands and `f32` values. The existing
-`ControllerGroup<C>` remains the simple adapter for ordinary controllers.
+The rewritten `PidController` declares `ctrl_kp`, `ctrl_ki`, `ctrl_kd`, and
+`ctrl_tau_d` at raw ids 0 to 3; `PassThrough` declares none. Both rely on the
+standard output lifecycle for reset. Neither receives an implicit host reset
+command.
+
+`StandardProgram::apply` forwards every `DOMAIN_CONTROLLER` id and payload
+verbatim to `StandardControl::apply`; it reserves no reset id and performs no
+offset. Each control owns its complete command-id space. The rig-specific group
+therefore legitimately assigns id 0 to `control_mode` and id 1 to
+`ctrl_reset`. Replace the old generic group with
+`ScalarControlGroup<C: StandardControl<H>, const H: usize>` for simple
+all-`f32` controls. It publishes exactly the control's declared scalar
+parameters, injects no reset parameter, and preserves ids. The
+mixed-type, cross-validated selectable control continues to use its dedicated
+group. Reset remains a lifecycle method; a host-visible reset exists only when
+the owning parameter group explicitly declares and routes one.
+
+`StandardProgram<C, H, N>` forwards `C::INPUTS_REQUIRED` as its own
+`Program::INPUTS_REQUIRED`; the existing `validate_sources` check therefore
+remains the binding guard. The optional scalar metadata above exists only so
+`ScalarControlGroup` can shadow simple `f32` parameters. It does not
+define command ids for a control which uses a dedicated typed group.
 
 ### Harmonic generation inside `StandardProgram`
 
@@ -168,9 +196,8 @@ authoritative.
 
 ### Output-enabled lifecycle
 
-The current `Controller` documentation says reset occurs when control is
-enabled or re-armed, but `StandardProgram` cannot presently see that lifecycle.
-Keep `StepCtx` as the loop-invariant immutable services value it is today.
+`StandardProgram` cannot presently see the safety lifecycle. Keep `StepCtx` as
+the loop-invariant immutable services value it is today.
 Instead, the RT loop loads one `SafetyInputs` snapshot per tick, calculates
 `output_enabled` as:
 
@@ -183,10 +210,16 @@ then used by the downstream gate, so a core-0 arm change cannot land between
 two inconsistent reads. This keeps ungated rigs permanently enabled.
 `StandardProgram` tracks the previous value and:
 
-- does not advance controller or PLL state while output is disabled;
+- does not advance PID, PLL, or other dynamic control state while output is
+  disabled, although lifecycle and fault-pulse bookkeeping still runs;
 - calls `reset` on a disabled-to-enabled transition;
 - calls `set_output_enabled` after transition handling; and
 - uses zero raw programme output and the nominal frequency while disabled.
+
+The harmonic generator and table player still advance while output is
+disabled, so `phase`, `target`, `forcing`, and the diagnostic `table` candidate
+retain their ordinary time-base meaning. Only the state of the selected
+control, including PID and PLL estimators, is frozen.
 
 On the first enabled PLL tick, the phase increment may still be the nominal
 `freq` value; the PLL centre increment takes effect on the following tick. The
@@ -198,20 +231,26 @@ this transient.
 The forcing and table values may still be calculated for telemetry, but the
 existing safety gate remains the sole authority which decides the applied
 output. The programme observes the gate state and never arms or clears a trip.
+There is one deliberate one-tick qualification: a rig or programme fault first
+evaluated after `step` quiets that tick's output, but the control has already
+advanced once. The newly latched trip makes `output_enabled` false on the next
+tick. Duplicating rig fault evaluation ahead of the control is not justified;
+tests must pin this one-tick state advance and immediate output quieting.
 
-### Source units and compatibility
+### Source units and built-in controls
 
 `StandardProgram` currently labels `target` as volts. Its source discovery must
-take the target unit from `StandardControl::REFERENCE_UNIT`; the blanket
-adapter retains volts, while this rig declares millimetres. `forcing` and
-`table` remain volts, and `phase` remains turns.
+take the target unit from `StandardControl::REFERENCE_UNIT`; the rewritten
+built-in controls retain volts, while this rig declares millimetres. `forcing`
+and `table` remain volts, and `phase` remains turns. In PLL mode the published
+`table` signal is the table player's generated candidate, for diagnostics only;
+the control deliberately excludes it from the raw output.
 
-Add sample-for-sample regression tests showing that a blanket-adapted
-`PassThrough` or `PidController` produces the same enabled outputs, commands,
-table behaviour, signal ordering, and telemetry as the current
-`StandardProgram`. The only intended common behaviour change is that a
-safety-gated controller no longer integrates while its output is disabled and
-is reset on re-arm, which is the already documented lifecycle.
+Test the rewritten `PassThrough` and `PidController` directly for their output
+composition, raw command ids, table behaviour, signal ordering, telemetry, and
+`INPUTS_REQUIRED`. The intended lifecycle change remains that a safety-gated
+control no longer integrates while its output is disabled and is reset on
+re-arm.
 
 ## Changes to the existing `helic_core::Pll`
 
@@ -291,10 +330,11 @@ Replace `min_amplitude` with:
 - `min_response_amplitude`, in the response sensor's units.
 
 The demodulator should return an observation containing measured phase and both
-fundamental amplitudes. Store these values in `Pll` and expose read-only
-getters. An invalid or sub-threshold observation resets the consecutive
-acquisition dwell. It continues to count towards loss of an established lock,
-as it does now.
+fundamental amplitudes. Keep qualification in squared-amplitude form, comparing
+`a^2 + b^2` with the corresponding squared threshold, as the current code does.
+Take square roots only to populate amplitude telemetry and getters. An invalid
+or sub-threshold observation resets the consecutive acquisition dwell. It
+continues to count towards loss of an established lock, as it does now.
 
 ### PI loop filter and anti-windup
 
@@ -307,21 +347,28 @@ gains use interpretable frequency units:
 The rig parameter group converts these once to phase-increment units using the
 sample rate. No `f64` conversion occurs on the tick path.
 
-The existing `Pll` retains a floating-point integral frequency correction. On
-each valid observation it computes, schematically:
+The existing `Pll` retains a floating-point integral correction in
+phase-increment units, relative to an exact `u32` centre. Do not represent the
+absolute command as `f32`: at 8 kHz its precision becomes coarser than one
+phase-increment quantum above 15.625 Hz. On each valid observation compute,
+schematically:
 
 ```text
 i_candidate = i + Ki * phase_error * dt
-f_unclamped = f_centre + Kp * phase_error + i_candidate
-f_command = clamp(f_unclamped, f_min, f_max)
+correction = Kp * phase_error + i_candidate
+bounded_correction = clamp(correction, min_increment - centre_increment,
+                            max_increment - centre_increment)
+command = centre_increment + round(bounded_correction)
 ```
 
 Use conditional-integration anti-windup: accept `i_candidate` if the command is
 not saturated or if the error drives the command back into the admissible
-window. Round to `u32` only after summing the centre, proportional, and integral
-terms. Do not retain the current correction remainder: the floating-point
-integrator already carries fractional information, and a remainder added to an
-absolute PI reconstruction would double-count it.
+window. Form the signed correction bounds without unsigned subtraction, and
+clamp the final integer sum to the configured inclusive `u32` bounds. At the
+few-hertz correction scale, `f32` retains sub-quantum information which the
+integrator can accumulate. Do not retain the current correction remainder: the
+relative floating-point state already carries that information, and the
+absolute reconstruction rounds only once.
 
 The gains may be signed because an unusual measured phase-frequency slope may
 reverse the required direction. Validation must reject non-finite gains. The
@@ -360,9 +407,11 @@ to one sample old. These paths add a differential delay which is separate from
 the question of whether `drive` represents force.
 
 For a differential delay `tau_inst`, the raw measured phase contains a bias
-`-360 f tau_inst` degrees. Add a signed `instrument_delay_s` to the existing
-PLL and correct its measured phase by `+360 f tau_inst` before forming the
-error. This constant-delay model must be fitted over the intended frequency
+`-360 f tau_inst` degrees. Add a signed `pll_delay_s` to the existing PLL and
+correct its measured phase by `+360 f tau_inst` before forming the error. Reduce
+the corrected phase with a full finite modulo into `[-180, 180)`, not the
+existing single-add-or-subtract helper, because the delay term can exceed one
+turn. This constant-delay model must be fitted over the intended frequency
 window during the open-loop commissioning sweep. If the residual is not
 consistent with a pure delay, replace it with an evidenced calibration model
 before interpreting quadrature as phase resonance. Quote the uncertainty in
@@ -413,7 +462,10 @@ declaring acquisition but not yet established as a useful trip condition.
 
 Acquisition timeout remains non-faulting and returns to fixed operation at the
 PLL centre frequency. `LockLost`, and only `LockLost`, contributes a programme
-fault and trips the output safety gate.
+fault and trips the output safety gate. It is deliberately latched: only a full
+`ctrl_reset`, or an accepted disarmed mode change which resets both algorithms,
+can leave `LockLost`. `pll_reacquire` has no effect in that state. Re-arming
+without first resetting therefore immediately re-latches the trip.
 
 ### Reacquisition and parameter changes
 
@@ -469,7 +521,11 @@ pub struct MagnetoelasticControl<const H: usize> {
 }
 ```
 
-Its `StandardControl` implementation declares `REFERENCE_UNIT = "mm"` and:
+Its `StandardControl` implementation declares `REFERENCE_UNIT = "mm"` and
+`INPUTS_REQUIRED` as one past the greatest compile-time measurement index it
+reads, at least the fixed laser and excitation-reference channels. Therefore
+the platform's existing source validation rejects any input-table refactor
+which leaves the control's indices out of range. It:
 
 - returns `forcing + table` and no frequency override in `None` mode;
 - applies the PID to `target - laser`, returns
@@ -479,36 +535,55 @@ Its `StandardControl` implementation declares `REFERENCE_UNIT = "mm"` and:
   increment in `Pll` mode.
 
 The control inputs include forcing and table so PID anti-windup can use the
-remaining actuator headroom. On every PID tick set its internal output limits
-to
+remaining actuator headroom. Define `SAFE_OUT_MIN` and `SAFE_OUT_MAX` once in
+the rig, from the fitted DAC window, and use those exact constants both here and
+in `Rig::clamp_output`. On every PID tick first form
+`feed_forward = forcing + table`. A non-finite result raises a programme fault
+and skips `Pid::update`. Otherwise set the PID limits to
 
 ```text
-pid_min = SAFE_OUT_MIN - forcing - table
-pid_max = SAFE_OUT_MAX - forcing - table,
+pid_min = (SAFE_OUT_MIN - feed_forward).min(0)
+pid_max = (SAFE_OUT_MAX - feed_forward).max(0).
 ```
 
-where `SAFE_OUT_MIN` and `SAFE_OUT_MAX` are derived from the same compile-time
-DAC window used by `Rig::clamp_output`. Do not expose softer run-time PID limits
-which can disagree with the hardware decision. The downstream safety clamp
-remains the final backstop, but ordinary feed-forward saturation now freezes an
-integrator which would drive further into saturation.
+For finite feed-forward the unexpanded residual interval is already ordered,
+because the same value is subtracted from both endpoints; it cannot invert as
+the review suggested. Expanding it to contain zero is nevertheless the right
+policy when feed-forward alone is out of range: the PID may cancel that excess
+but is never forced to do so, and its integrator cannot drive farther outwards.
+The downstream safety clamp remains the final backstop. Core 0 should also use
+`FourierCoeffs::amplitude_bound` to reject a forcing set which alone exceeds
+the same window, as defence in depth; the core-1 finite check remains necessary
+because forcing and table are composed only there.
+
+The `Pid` anti-windup test must use the sign of the proposed integral increment,
+`pid_ki * error * dt`, rather than the sign of `error` alone. The current test is
+only correct for positive `pid_ki`; using the actual increment makes the
+conditional-integration rule correct for either evidenced feedback sign.
 
 The PID feedback channel is fixed to the named laser input at compile time.
 Do not retain a freely writable numeric feedback index: it permits
 dimensionally invalid feedback and makes saved parameter sets dependent on
 source ordering.
 
-PID entry is also firmware-checked. On the first enabled PID tick, and on the
-first tick after activating replacement target coefficients in PID mode,
-compare the active `target_coeffs.mean` with the current laser distance. If
-their absolute difference exceeds an evidence-backed
-`PID_ENTRY_ERROR_MAX_MM`, raise a programme fault before applying output. The
-rig control can detect the latter case from the `reference_mean` input, without
-a target-specific platform callback. This turns the 25 mm absolute-laser offset
-trap into an enforced condition. A bumpless initial PID contribution is
-desirable, but it does not replace the mean check because an integral term
-would otherwise drive persistently towards a dimensionally valid but unsafe
-zero-millimetre target.
+PID entry is also firmware-checked against a short-window laser mean, not one
+instantaneous sample. On the first enabled PID tick, hold the raw output at zero
+for an evidence-backed `PID_ENTRY_DWELL_S`, accumulate the laser mean and
+peak-to-peak range, and require both:
+
+```text
+laser_peak_to_peak <= PID_ENTRY_QUIET_MM
+abs(target_coeffs.mean - laser_mean) <= PID_ENTRY_ERROR_MAX_MM.
+```
+
+Only then begin PID updates. A failed qualification raises a programme fault
+before non-zero output. If `reference_mean` changes while PID is already
+enabled, fault and quiet immediately; the host must disarm, let the plant
+settle, update the target, and re-arm through the same qualification. Changes
+to zero-mean harmonic coefficients need not trigger this particular interlock.
+This turns the 25 mm absolute-laser offset trap into an enforced condition
+without weakening the bound by the current response amplitude. A bumpless
+initial PID contribution is desirable, but does not replace the mean check.
 
 The PLL response channel is likewise the laser. The excitation reference is a
 hardware decision which remains unresolved:
@@ -549,7 +624,7 @@ The proposed host-visible parameters are:
 | `pll_kp` | `f32` | Hz/degree, normally positive |
 | `pll_ki` | `f32` | Hz/(degree s), normally positive |
 | `pll_target_phase` | `f32` | degree, conventional response minus excitation |
-| `pll_delay` | `f32` | s, signed response-path minus excitation-path delay |
+| `pll_delay_s` | `f32` | signed response-path minus excitation-path delay, s |
 | `pll_dc_tau` | `f32` | s |
 | `pll_demod_tau` | `f32` | s |
 | `pll_excitation_min` | `f32` | excitation-source unit |
@@ -562,12 +637,13 @@ The proposed host-visible parameters are:
 | `pll_acquire_timeout` | `f32` | s |
 | `pll_saturation_dwell` | `f32` | s |
 
-All time constants, amplitudes, tolerances, and dwell times are finite and
-non-negative, except `pll_dc_tau`, which is strictly positive. Phase lies in
-`[-180, 180)`. Unlock phase tolerance is not smaller than lock phase
-tolerance. Defaults must be identical in the core-0 shadow and the constructed
-core-1 object. PID gains default to zero. No unevidenced PLL gain or frequency
-window is made a production default merely to make acquisition appear to work.
+All amplitudes, tolerances, dwell times, and non-delay time constants are finite
+and non-negative, with `pll_dc_tau` strictly positive. `pll_delay_s` is finite
+and signed. Phase lies in `[-180, 180)`. Unlock phase tolerance is not smaller
+than lock phase tolerance. Defaults must be identical in the core-0 shadow and
+the constructed core-1 object. PID gains default to zero. No unevidenced PLL
+gain or frequency window is made a production default merely to make
+acquisition appear to work.
 
 The core-0 group rejects `control_mode` with `BadValue` while its safety
 snapshot is armed. This makes the ordinary error synchronous and informative.
@@ -600,9 +676,12 @@ in every mode:
 | `pll_state` | enum | current PLL state |
 
 Do not spend six stream slots on physically unused `adc2` to `adc7`. The ADC
-frame is still acquired in full, but `Rig::INPUTS` publishes only named,
-connected measurements. Reserve one spare physical ADC input for a measured
-exciter-current or force signal and name it when wired; this replaces a spare
+frame is still acquired in full, but `Rig::measure` copies only the named ADC
+channels into the compact output slice, then writes laser and stator at their
+new indices; `Rig::INPUTS`, the slice writes, the named index constants, and
+`StandardControl::INPUTS_REQUIRED` change together. Reserve one spare physical
+ADC input for a measured exciter-current or force signal and name it when
+wired; this replaces a spare
 rather than growing the source table. A likely commissioned set is `coil`,
 `drive`, `current`, `laser`, and `stator`, giving five rig inputs, twelve
 programme signals, one actuator, and `cmd_epoch`: 19 of the 24 reviewed slots.
@@ -629,8 +708,9 @@ disarmed. Before first entering PID mode in a session, measure the laser resting
 position and set the mean of `target_coeffs` to it while PID gains remain zero.
 A zero-mean displacement target against an absolute laser reading near 25 mm
 would otherwise command a large, dimensionally valid error as soon as non-zero
-gain is applied. The firmware entry check is authoritative; this operating
-sequence explains how to satisfy it.
+gain is applied. Wait for the disarmed structure to become quiescent before
+arming. The firmware's quiet-window and mean checks are authoritative; this
+operating sequence explains how to satisfy them.
 
 The normal PLL sequence is:
 
@@ -677,17 +757,20 @@ Extend the existing `helic-core` tests to cover:
 - non-zero and slowly drifting means on both inputs;
 - warm-up after reset and reacquisition, including timeout starting only after
   warm-up;
-- independent excitation and response amplitude thresholds;
-- constant instrumentation-delay compensation, sign, and uncertainty;
+- independent excitation and response squared-amplitude thresholds, with
+  square roots confined to telemetry;
+- constant instrumentation-delay compensation, sign, uncertainty, and
+  positive and negative corrections exceeding one turn;
 - PI convergence for both signs of a monotone phase-frequency slope;
 - proportional response, integral convergence, conditional anti-windup, and
   recovery from both frequency limits;
-- phase-increment quantisation while the floating-point integrator retains
-  sub-quantum corrections;
+- phase-increment quantisation while a centre-relative floating-point
+  integrator accumulates a sub-quantum correction to a whole quantum at a
+  carrier above 15.625 Hz;
 - continuous valid dwell, with one invalid sample resetting acquisition dwell;
 - phase and unquantised frequency-span lock qualification;
 - lock/unlock hysteresis, acquisition timeout, saturation dwell, and latched
-  lock loss;
+  lock loss, including `reacquire` being unable to leave `LockLost`;
 - replayed enable preserving lock and explicit reacquisition preserving the
   current frequency; and
 - every public run-time setter rejecting invalid values without panicking.
@@ -696,21 +779,27 @@ Extend the existing `helic-core` tests to cover:
 
 Add host tests for:
 
-- sample-for-sample compatibility of blanket-adapted existing controllers;
+- direct output, telemetry, and raw-id tests for the rewritten `PassThrough`
+  and fixed-input `PidController`;
 - shared harmonic projection matching the previous target and forcing values;
 - an increment returned on tick `n` first affecting tick `n + 1`;
 - leaving PLL mode restoring the standard nominal frequency;
-- no control-state evolution while output is disabled and reset on re-arm;
+- no dynamic control-state evolution while output is disabled, continued
+  generator and table advancement, reset on re-arm, and the documented one-tick
+  state advance when a downstream fault first appears;
 - the exact output expression in all three modes;
 - table suppression in PLL mode;
-- residual PID output limits after forcing and table, PID anti-windup, and the
-  target-mean interlock on entry and coefficient replacement;
+- residual PID output limits after forcing and table, feed-forward beyond the
+  window in both directions, non-finite feed-forward, signed-integral PID
+  anti-windup, and the quiet-window target-mean interlock;
 - armed mode-write rejection, the arm/write race, fault-pulse ordering, and
   explicit re-arm behaviour;
-- exact controller reset and first/last parameter-id routing;
+- verbatim routing of every controller id and payload, including
+  `control_mode = 0` and `ctrl_reset = 1`;
 - parameter type, bound, cross-parameter, shadow, and command-epoch semantics;
-- fixed source names, units, ordering, omission of unused ADC sources, and the
-  24-source limit; and
+- fixed source names, units, ordering, the diagnostic-only meaning of `table`
+  in PLL mode, compact `measure` writes, `INPUTS_REQUIRED`, omission of unused
+  ADC sources, and the 24-source limit; and
 - `Program::fault` being true only for the mode-transition pulse, internal
   contract failure, or `PllState::LockLost`.
 
@@ -759,8 +848,11 @@ below the existing 60 microsecond hardware regression limit with zero overruns.
 The former 63 to 64 microsecond command-copy cost was removed in platform
 v0.2.1; this rig subsequently measured quiet and hundreds of write ticks at
 about 44 to 45 microseconds, and v0.2.5 retains that compact command envelope.
-The 60 microsecond acceptance is therefore current and testable, not merely a
-quiet-tick limit. Software checks alone do not establish the revised PLL path.
+This leaves about 15 microseconds, approximately 2250 cycles at 150 MHz, for
+the complete added PLL path; the shared harmonic frame repays 32 LUT lookups
+from the present target and forcing projections. The 60 microsecond acceptance
+is current and testable, not merely a quiet-tick limit. Software checks alone
+do not establish that the revised PLL fits the stated headroom.
 
 ## Delivery sequence and repository ownership
 
@@ -771,16 +863,18 @@ HELIC-DAQ beside `docs/rt_program_proposal.md` and
 parameters, source choices, safety decisions, and commissioning contract. The
 platform pull request is reviewed and merged before the rig is repinned.
 
-`Pll` does not yet have two firmware consumers, so this work does not satisfy
-the platform's usual placement test by inventing one. Revising it in place is
-nevertheless preferable because the already exported implementation and its
-tests are in `helic-core`; moving it into this rig merely to move it back on a
-second use would be churn. No second PLL implementation is created.
+`Pll` does not yet have two firmware consumers. The developer guide permits a
+second route into `helic-core`, deliberate acceptance as a platform primitive,
+which already applies: `Pll` is exported, tested, and documented there. Its
+single immediate consumer is stated rather than hidden, and avoiding relocation
+churn is supporting rather than primary justification. No second PLL
+implementation is created.
 
-1. In the HELIC-DAQ platform proposal and implementation, introduce
-   `StandardControl`, the existing
-   `Controller` adapter, shared-frame `StandardProgram`, coherent per-tick
-   output-enabled flag, and compatibility tests.
+1. In the HELIC-DAQ platform proposal and implementation, replace `Controller`
+   with `StandardControl`, rewrite `PassThrough`, `PidController`, and their
+   scalar parameter group, add shared-frame `StandardProgram`, a coherent
+   per-tick output-enabled flag, and direct tests. No compatibility adapter or
+   reserved controller id remains.
 2. In the same platform, revise the existing `helic_core::Pll` and its tests.
    Do not add a second PLL type.
 3. Release a platform tag. Update this repository's `Cargo.toml`, CI workflow,
@@ -794,11 +888,10 @@ second use would be churn. No second PLL implementation is created.
 6. Simulate, plot, commission on hardware, and record evidence before declaring
    PID or PLL mode verified.
 
-The platform tag also corrects two documentation debts: `Controller::reset`
-must describe the lifecycle actually implemented, and the developer guide's
-standard-signal ordering and target-unit description must reflect the new
-control-provided reference unit. Both changes are called out in the tag
-message.
+The platform tag removes the obsolete `Controller` documentation and updates
+the developer guide's control lifecycle, standard-signal ordering, target-unit
+description, raw command-id ownership, and deliberate `Pll` placement. These
+changes are called out in the tag message.
 
 If the rig work must begin before the platform release, use a temporary
 `[patch.crates-io]` against the platform branch, record why it exists, and
@@ -1354,3 +1447,76 @@ document's own framing does not supply one.
    than code.
 4. Split the platform half upstream, as already agreed, with the revised
    routing rule in it.
+
+## Response to second review, 2026-08-19
+
+The proposal above has been revised again. The scope clarification removes the
+only plausible reason to preserve `Controller`, so the first response's adapter
+decision is superseded. The second review is otherwise accepted with one
+correction to its PID-panic argument.
+
+### Control API and command ids
+
+- **Delete `Controller`: accepted.** `PassThrough` and
+  `PidController<const FEEDBACK: usize>` are rewritten as direct
+  `StandardControl` implementations, `ctrl_feedback` disappears, and the
+  numerical `Pid` remains in `helic-core`.
+- **Remove reserved routing: accepted.** `StandardProgram` forwards every raw
+  controller id and payload. The scalar group injects no reset, while the
+  selectable rig group owns id 0 as `control_mode`, id 1 as `ctrl_reset`, and
+  its remaining mixed-type space. This resolves the silent id-0 collision
+  rather than merely reordering around it.
+- **Input binding: accepted.** `StandardControl::INPUTS_REQUIRED` is forwarded
+  by `StandardProgram`, and the fixed-input PID and rig control both declare
+  their actual minimum.
+
+### Correctness
+
+- **PID residual limits: conclusion accepted, mechanism corrected.** For finite
+  `feed`, subtracting it from both ordered endpoints cannot make
+  `pid_min > pid_max`; the review's stated panic mechanism is algebraically
+  impossible. Non-finite composed feed-forward can, however, give `clamp` a
+  `NaN` bound. The revised design checks finiteness before `Pid::update`, uses
+  one shared definition of the rig's safe output bounds, and expands the finite
+  residual interval to contain zero. It also rejects an individually excessive
+  forcing bound on core 0 and tests both directions plus non-finite composition.
+  The pass also fixes `Pid` anti-windup to test the proposed integral increment,
+  rather than assuming `pid_ki` is positive from the sign of the error.
+- **Centre-relative PI representation: accepted.** Centre and bounds remain
+  exact integer increments, while proportional and integral corrections are
+  floating point relative to the centre. The correction remainder still goes,
+  and a test above 15.625 Hz proves accumulation from below one quantum.
+- **Delay wrapping: accepted.** `pll_delay_s` is the one name in both halves,
+  and corrected phase uses a full finite modulo, including multi-turn tests in
+  both directions.
+- **One-tick lifecycle lag: accepted.** A newly observed downstream fault
+  quiets output immediately but freezes control state only from the following
+  tick. That exception is now normative and tested; no duplicate pre-step rig
+  fault path is added.
+
+### State, safety, and source semantics
+
+- **`LockLost` exit: specified.** Only full reset or an accepted disarmed mode
+  change can leave it. `pll_reacquire` cannot, and re-arming without reset
+  re-latches the trip.
+- **PID entry: strengthened.** Entry holds output at zero while measuring a
+  short-window laser mean and peak-to-peak quietness. An enabled change of the
+  reference mean faults immediately and requires disarm, settling, and the same
+  requalification. This avoids comparing a DC target with an oscillating
+  instantaneous sample.
+- **Compact inputs: accepted.** `measure`, `Rig::INPUTS`, laser and stator
+  indices, and `INPUTS_REQUIRED` now form one required edit. Decoding all eight
+  ADC values no longer implies publishing all eight.
+- **Signal evolution: specified.** The generator and table player continue
+  advancing while disarmed. In PLL mode, `table` is explicitly a generated
+  diagnostic candidate which was not included in `out`.
+
+### Smaller points
+
+All five are accepted. Threshold qualification stays squared, with square
+roots only for telemetry. `reference_mean` is justified as a free, generic
+Fourier-reference property rather than a rig event. `Pll` placement rests on
+its deliberate acceptance as a platform primitive. The timing section now
+states approximately 15 microseconds, or 2250 cycles at 150 MHz, of measured
+headroom and the 32-LUT saving from the shared frame. `pll_delay_s` is used
+consistently.
