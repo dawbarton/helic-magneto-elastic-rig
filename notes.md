@@ -2206,3 +2206,27 @@ from the homing commissioning entry above.
   and README installation command can be repinned together to the release tag.
   No hardware timing, electrical, PID, or PLL acceptance is claimed by this
   entry.
+
+## 2026-08-19T12:24+00:00 Platform 0.3 migration is release-build clean
+
+The final breaking-API clean-up made the existing platform `Pll` non-generic,
+renamed this rig's compile-time seam to `ActiveControl`/`make_control`, removed
+the unused `COIL_INPUT` index constant, and stopped re-exporting output-stage
+safety constants through `config.rs`. The physical rig now imports those
+bounds directly from the host-tested `safety_limits` module. No control
+semantics, parameter name, signal name, or safety bound changed.
+
+The nine host control/parameter tests and host clippy pass. Both the default
+W5500 release build and the explicit W6100 release build pass with warnings
+denied; the crate dependency policy and `magnetoelastic` SRAM layout profile
+also pass against each variant's release ELF. No firmware was flashed and no
+rig was energised, so the existing PID and PLL commissioning
+blockers remain unchanged and this adds no timing, electrical, or phase
+evidence.
+
+The platform checkout is prepared as 0.3.0 but has not been tagged or
+published. This rig therefore still pins v0.2.5 under the documented sibling
+patch. After the platform v0.3.0 tag exists, remove the patch and change the
+eight crate tags, `HELIC_DAQ_TAG` in CI, and the README host-tool install
+reference together; then regenerate `Cargo.lock` and repeat these software
+gates before any rig release.
