@@ -8,10 +8,6 @@
 //! its `docs/developer_guide.md`.
 
 use fw_magnetoelastic_rig::control::MagnetoelasticControl;
-#[allow(unused_imports)]
-pub use fw_magnetoelastic_rig::safety_limits::{
-    DAC_OUT_CEILING_V, DAC_OUT_FLOOR_V, DAC_VREF, MID_RAIL, SAFE_OUT_MAX_V, SAFE_OUT_MIN_V,
-};
 use helic_fw_support::net::NetConfig;
 pub use helic_rt::SampleRate;
 
@@ -34,8 +30,8 @@ pub const LASER_RANGE_MM: f32 = 50.0;
 
 // --- Output safety limits (enforced by the firmware safety gate) ---------
 //
-// These are hard constraints applied on core 1 after the controller/forcing/
-// table sum, before the DAC write. They are compile-time here (edit and
+// These are hard constraints applied on core 1 after programme composition,
+// before the DAC write. They are compile-time here (edit and
 // reflash to change). See "Output safety gate" in the platform's
 // `docs/developer_guide.md`.
 
@@ -317,15 +313,15 @@ pub const NET_CONFIG: NetConfig = NetConfig::Static {
 pub const MAC_ADDR: [u8; 6] = [0x02, 0x48, 0x4C, 0x00, 0x00, 0x01];
 
 /// Run-time-selectable, statically dispatched control policy.
-pub type ActiveController = MagnetoelasticControl<HARMONICS>;
+pub type ActiveControl = MagnetoelasticControl<HARMONICS>;
 /// Statically selected core-1 programme.
-pub type ActiveProgram = helic_rt::StandardProgram<ActiveController, HARMONICS, TABLE_CAPACITY>;
+pub type ActiveProgram = helic_rt::StandardProgram<ActiveControl, HARMONICS, TABLE_CAPACITY>;
 
-/// Construct the one controller instance which is later moved to core 1.
+/// Construct the one control instance which is later moved to core 1.
 ///
-/// Keep constructor defaults consistent with the controller's `param_value`
+/// Keep constructor defaults consistent with the control's `param_value`
 /// implementation so the host-visible parameter shadow starts correctly.
-pub fn make_controller() -> ActiveController {
+pub fn make_control() -> ActiveControl {
     MagnetoelasticControl::new()
 }
 

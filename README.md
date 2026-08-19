@@ -56,18 +56,21 @@ executor on core 1, and its whole tick path executes from SRAM.
 
 This rig drives an exciter through a feedback path that can go unstable, so it
 opts into the platform's per-tick output safety gate (`SAFETY_GATED = true`).
-The gate runs after the controller, forcing and table sum, and before the DAC
-write:
+The gate runs after the selected control has composed the raw programme output,
+and before the DAC write:
 
 - the logical command is clamped so both driven channel voltages stay inside
-  the window set by `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V` in `src/config.rs`;
+  the window set by `DAC_OUT_FLOOR_V`/`DAC_OUT_CEILING_V` in
+  `src/safety_limits.rs`;
 - tip displacement outside `DISPLACEMENT_MIN_MM`–`DISPLACEMENT_MAX_MM`, a
   non-finite reading, or a laser feed that stops advancing for
   `LASER_STALE_AFTER_S` latches a fault and quiets the actuator;
 - safety starts disarmed after flashing, and a dropped control connection
   disarms it again.
 
-These limits are compile-time: change them in `src/config.rs` and reflash.
+These limits are compile-time: the output-stage bounds live in
+`src/safety_limits.rs`, and the displacement and staleness bounds live in
+`src/config.rs`; change them and reflash.
 They must match the fitted output stages and the physical travel available to
 the specimen. `DAC_POLARITY` in `src/rig.rs` likewise describes the fitted
 analogue board and is not a free choice.
@@ -75,8 +78,8 @@ analogue board and is not a free choice.
 ## Layout
 
 `src/board.rs` is the complete pin and ownership map; `src/config.rs` holds the
-compile-time laboratory choices, including the sample rate, safety limits,
-network configuration and active programme; `src/lib.rs`, `src/control.rs`,
+compile-time laboratory choices, including the sample rate, displacement and
+staleness limits, network configuration, and active programme; `src/lib.rs`, `src/control.rs`,
 `src/control_params.rs`, and `src/safety_limits.rs` hold the host-testable
 selectable policy, typed parameter group, and shared output bound; `src/rig.rs`
 assembles the core-1 hardware and implements `Rig`; `src/telemetry.rs` declares

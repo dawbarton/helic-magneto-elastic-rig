@@ -5,7 +5,6 @@ use helic_rt::{ControlStep, Payload, SampleRate, StandardControl, StandardContro
 
 use crate::safety_limits::{SAFE_OUT_MAX_V, SAFE_OUT_MIN_V};
 
-pub const COIL_INPUT: usize = 0;
 pub const DRIVE_INPUT: usize = 1;
 pub const LASER_INPUT: usize = 2;
 pub const STATOR_INPUT: usize = 3;
@@ -105,7 +104,7 @@ pub struct MagnetoelasticControl<const H: usize> {
     mode: ControlMode,
     pending_mode: Option<ControlMode>,
     pid: Pid,
-    pll: Pll<H>,
+    pll: Pll,
     output_enabled: bool,
     pid_error: f32,
     frequency_actual_hz: f32,

@@ -12,6 +12,11 @@ software implementation is present locally against unreleased platform 0.3.0;
 `docs/control.md` states the resulting operator contract and the deliberate
 PID/PLL commissioning blockers.
 
+The release clean-up subsequently made `helic_core::Pll` non-generic because
+it stores no harmonic-sized state; `Pll::update<const H>` accepts the shared
+frame. Any `Pll<H>` spellings in the proposal and review record below are
+historical sketches, not the released API.
+
 The phase-locked use case is the backbone and nonlinear frequency-response
 method described by the CBC Duffing project's `docs/methods/phase-locked-loop.md`:
 fundamental excitation-to-response phase is controlled through excitation

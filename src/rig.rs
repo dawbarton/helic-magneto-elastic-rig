@@ -30,19 +30,17 @@ use crate::board::MagnetoelasticParts;
 // atomic is the live value.
 use crate::config::{
     DISPLACEMENT_MAX_MM, DISPLACEMENT_MIN_MM, LASER_RANGE_MM as DEFAULT_LASER_RANGE_MM,
-    LASER_STALE_AFTER_S, MAX_STATOR_BACKLASH_MM, MAX_STATOR_RATE_MM_S, MID_RAIL, OUTPUT_CHANNEL,
-    SAFE_OUT_MAX_V, SAFE_OUT_MIN_V, STATOR_BACKLASH_MM as DEFAULT_STATOR_BACKLASH_MM,
-    STATOR_DATUM_MM as DEFAULT_STATOR_DATUM_MM, STATOR_HOLD_DEFAULT,
-    STATOR_RATE_MM_S as DEFAULT_STATOR_RATE_MM_S, STATOR_SEEK_MAX_MM,
+    LASER_STALE_AFTER_S, MAX_STATOR_BACKLASH_MM, MAX_STATOR_RATE_MM_S, OUTPUT_CHANNEL,
+    STATOR_BACKLASH_MM as DEFAULT_STATOR_BACKLASH_MM, STATOR_DATUM_MM as DEFAULT_STATOR_DATUM_MM,
+    STATOR_HOLD_DEFAULT, STATOR_RATE_MM_S as DEFAULT_STATOR_RATE_MM_S, STATOR_SEEK_MAX_MM,
 };
+use crate::safety_limits::{DAC_VREF, MID_RAIL, SAFE_OUT_MAX_V, SAFE_OUT_MIN_V};
 use crate::stator::{issue_command, CMD_HOME, CMD_JOG, CMD_MOVE, CMD_STOP};
 use crate::telemetry::{
     LASER_FRAMES_RECEIVED, LASER_RANGE_MM, LASER_VALUE, STATOR_BACKLASH_MM, STATOR_DATUM_MM,
     STATOR_HOLD, STATOR_JOG_MM, STATOR_POSITION_MM, STATOR_RATE_MM_S, STATOR_TARGET_MM,
 };
 use fw_magnetoelastic_rig::control::{LASER_INPUT, STATOR_INPUT};
-
-use crate::config::DAC_VREF;
 
 /// DAC channel wired to the negative differential input of the exciter
 /// current controller (AD5064 channel C). Driven symmetrically with the
@@ -176,7 +174,7 @@ impl MagnetoelasticParts {
 }
 
 impl Rig for MagnetoelasticRig {
-    // `measure` fills this exact order. The common loop appends controller
+    // `measure` fills this exact order. The common loop appends control
     // telemetry and generated signals without experiment-specific indices.
     //
     // AD7609 channels 0 and 1 carry named physical measurements; unused
@@ -308,13 +306,11 @@ impl Rig for MagnetoelasticRig {
         debug_assert_eq!(actuator, 0);
         // Hard amplitude ceiling: clamp the logical command so both driven
         // channel voltages, `MID_RAIL + out/2` (A) and `MID_RAIL - out/2`
-        // (C), stay inside the safe DAC window set by `DAC_OUT_FLOOR_V`/
-        // `DAC_OUT_CEILING_V`. `clamp_channel_command` clamps a per-channel
-        // deviation from `MID_RAIL`, so it is applied to `out/2` and the
-        // clamped half doubled back into `out`'s own (differential) units.
-        // Applied after the controller/forcing/table sum, so no single stage
-        // can push the exciter past it. The AD5064 driver's own 0-4.096 V
-        // clamp remains as a final backstop.
+        // (C), stay inside the safe DAC window from which
+        // `SAFE_OUT_MIN_V`/`SAFE_OUT_MAX_V` are derived.
+        // Applied after programme composition, so no control mode can push
+        // the exciter past it. The AD5064 driver's own 0-4.096 V clamp remains
+        // as a final backstop.
         out.clamp(SAFE_OUT_MIN_V, SAFE_OUT_MAX_V)
     }
 

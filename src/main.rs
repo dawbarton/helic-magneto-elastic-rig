@@ -1,7 +1,7 @@
 //! HELIC-DAQ firmware: boots both RP2350 cores under Embassy.
 //!
 //! Core 1 runs the real-time loop (`rt_loop`): PWM-timed CONVST, BUSY-edge
-//! pipeline, generators + controller, DAC output. Core 0 owns host
+//! pipeline, generators + control, DAC output. Core 0 owns host
 //! communications: WIZnet Ethernet with a TCP control server (parameter
 //! registry, stream control) and a UDP sample streamer, plus the laser UART
 //! and a 1 Hz defmt status line.
@@ -95,7 +95,7 @@ static FORCING_COEFFS: ConstStaticCell<DoubleBuffer<FourierCoeffs<{ config::HARM
 static PLATFORM_GROUP: StaticCell<PlatformGroup> = StaticCell::new();
 static GENERATOR_GROUP: StaticCell<GeneratorGroup<{ config::HARMONICS }>> = StaticCell::new();
 static TABLE_GROUP: StaticCell<TableGroup<{ config::TABLE_CAPACITY }>> = StaticCell::new();
-static CONTROLLER_GROUP: StaticCell<MagnetoelasticControlGroup> = StaticCell::new();
+static CONTROL_GROUP: StaticCell<MagnetoelasticControlGroup> = StaticCell::new();
 static RIG_GROUP: StaticCell<RigGroup<MagnetoelasticRig>> = StaticCell::new();
 static TELEMETRY_GROUP: StaticCell<TelemetryGroup> = StaticCell::new();
 static LASER_TX_BUFFER: StaticCell<[u8; 64]> = StaticCell::new();
@@ -126,7 +126,7 @@ fn main() -> ! {
     // sample records flow 1 -> 0.
     let channels = shared_rt::init_channels(TARGET_COEFFS.take(), FORCING_COEFFS.take());
     let (table_staging, active_table) = TABLE.take().split();
-    let controller = config::make_controller();
+    let control = config::make_control();
     let mut store = Store::new(channels.command_tx, &RT_SHARED, config::SAMPLE_RATE);
     store.push(PLATFORM_GROUP.init(PlatformGroup::new(
         &RT_SHARED,
@@ -142,7 +142,7 @@ fn main() -> ! {
     generator_group.set_forcing_amplitude_limit(SAFE_OUT_MAX_V);
     store.push(generator_group);
     store.push(TABLE_GROUP.init(TableGroup::new(table_staging, config::SAMPLE_RATE)));
-    store.push(CONTROLLER_GROUP.init(MagnetoelasticControlGroup::new(
+    store.push(CONTROL_GROUP.init(MagnetoelasticControlGroup::new(
         &RT_SHARED,
         config::SAMPLE_RATE,
     )));
@@ -151,7 +151,7 @@ fn main() -> ! {
     store.validate(<config::ActiveProgram as Program>::DOMAINS);
     helic_rt::validate_sources::<MagnetoelasticRig, config::ActiveProgram>();
     let program = StandardProgram::new(
-        controller,
+        control,
         channels.target_active,
         channels.forcing_active,
         active_table,
