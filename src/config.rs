@@ -39,19 +39,9 @@ pub const LASER_RANGE_MM: f32 = 50.0;
 // reflash to change). See "Output safety gate" in the platform's
 // `docs/developer_guide.md`.
 
-/// Upper bound on the DAC output voltage driven to either differential input
-/// of the exciter current controller (channels A and C, driven symmetrically
-/// about `MID_RAIL`). Set below the 4.096 V DAC rail. Since 2026-08-18 `out`
-/// is the differential command (`out` = A - C, matching the `drive`
-/// loopback), so each channel only moves by `out/2`; the gate clamps the
-/// logical command so that neither `MID_RAIL + out/2` (A) nor
-/// `MID_RAIL - out/2` (C) ever exceeds this, which bounds `out` itself to
-/// ±3.904 V rather than the ±1.952 V of the previous per-channel convention.
-
-/// Lower bound on the same channel voltages. Chosen symmetric about
-/// `MID_RAIL` for the interim unipolar output stage, so the same bound
-/// protects both channels via `out/2`. A future bipolar output stage will
-/// re-home the common mode and turn these into independent ± limits.
+// The DAC channel bounds and the derived differential-command bounds live in
+// `safety_limits.rs`, which is shared by the physical gate and PID residual
+// limiter so those two constraints cannot diverge.
 
 /// Safe tip-displacement window (laser, mm). Outside this the gate latches a
 /// fault and holds the actuator quiet until the host re-arms. Conservative

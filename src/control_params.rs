@@ -8,18 +8,18 @@ use helic_rt::{Payload, RtShared, SampleRate, DOMAIN_CONTROLLER};
 use crate::control::*;
 
 pub const CONTROL_DEFAULTS: [f32; CONTROL_PARAM_COUNT] = [
-    0.0,   // control_mode
-    0.0,   // ctrl_reset
-    0.0,   // pll_reacquire
-    0.0,   // pid_kp
-    0.0,   // pid_ki
-    0.0,   // pid_kd
-    0.0,   // pid_tau_d
-    0.0,   // pll_centre_freq
-    0.0,   // pll_freq_min
-    0.0,   // pll_freq_max
-    0.0,   // pll_kp
-    0.0,   // pll_ki
+    0.0, // control_mode
+    0.0, // ctrl_reset
+    0.0, // pll_reacquire
+    0.0, // pid_kp
+    0.0, // pid_ki
+    0.0, // pid_kd
+    0.0, // pid_tau_d
+    0.0, // pll_centre_freq
+    0.0, // pll_freq_min
+    0.0, // pll_freq_max
+    0.0, // pll_kp
+    0.0, // pll_ki
     default_pll_config().target_phase_deg,
     default_pll_config().delay_s,
     default_pll_config().dc_time_constant_s,
