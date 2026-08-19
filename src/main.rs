@@ -27,6 +27,8 @@ use embassy_rp::multicore::{spawn_core1, Stack as CoreStack};
 use embassy_rp::peripherals::{DMA_CH2, DMA_CH3, PIO0, UART0};
 use embassy_rp::{pio, uart};
 use embassy_time::Timer;
+use fw_magnetoelastic_rig::control_params::MagnetoelasticControlGroup;
+use fw_magnetoelastic_rig::safety_limits::SAFE_OUT_MAX_V;
 use helic_core::{DoubleBuffer, FourierCoeffs, TableBuffer};
 use helic_fw_rt::rt_loop as shared_rt;
 use helic_fw_support::comms;
@@ -34,10 +36,9 @@ use helic_fw_support::identity::Identity;
 use helic_fw_support::net;
 use helic_fw_support::net::wiznet::EthernetParts;
 use helic_rt::params::{
-    ControllerGroup, GeneratorGroup, ParamStore, PlatformGroup, RigGroup, TableGroup,
-    TelemetryGroup,
+    GeneratorGroup, ParamStore, PlatformGroup, RigGroup, TableGroup, TelemetryGroup,
 };
-use helic_rt::{Program, RecordConsumer, Rig, RtShared, StandardProgram};
+use helic_rt::{Program, RecordConsumer, RtShared, StandardProgram};
 use panic_probe as _;
 use static_cell::{ConstStaticCell, StaticCell};
 
@@ -94,7 +95,7 @@ static FORCING_COEFFS: ConstStaticCell<DoubleBuffer<FourierCoeffs<{ config::HARM
 static PLATFORM_GROUP: StaticCell<PlatformGroup> = StaticCell::new();
 static GENERATOR_GROUP: StaticCell<GeneratorGroup<{ config::HARMONICS }>> = StaticCell::new();
 static TABLE_GROUP: StaticCell<TableGroup<{ config::TABLE_CAPACITY }>> = StaticCell::new();
-static CONTROLLER_GROUP: StaticCell<ControllerGroup<config::ActiveController>> = StaticCell::new();
+static CONTROLLER_GROUP: StaticCell<MagnetoelasticControlGroup> = StaticCell::new();
 static RIG_GROUP: StaticCell<RigGroup<MagnetoelasticRig>> = StaticCell::new();
 static TELEMETRY_GROUP: StaticCell<TelemetryGroup> = StaticCell::new();
 static LASER_TX_BUFFER: StaticCell<[u8; 64]> = StaticCell::new();
@@ -133,15 +134,17 @@ fn main() -> ! {
         IDENTITY.version,
         config::EXPERIMENT,
     )));
-    store.push(GENERATOR_GROUP.init(GeneratorGroup::new(
+    let generator_group = GENERATOR_GROUP.init(GeneratorGroup::new(
         channels.target_staging,
         channels.forcing_staging,
         config::SAMPLE_RATE,
-    )));
+    ));
+    generator_group.set_forcing_amplitude_limit(SAFE_OUT_MAX_V);
+    store.push(generator_group);
     store.push(TABLE_GROUP.init(TableGroup::new(table_staging, config::SAMPLE_RATE)));
-    store.push(CONTROLLER_GROUP.init(ControllerGroup::new(
-        &controller,
-        MagnetoelasticRig::INPUTS.len(),
+    store.push(CONTROLLER_GROUP.init(MagnetoelasticControlGroup::new(
+        &RT_SHARED,
+        config::SAMPLE_RATE,
     )));
     store.push(RIG_GROUP.init(RigGroup::<MagnetoelasticRig>::new()));
     store.push(TELEMETRY_GROUP.init(TelemetryGroup::new(telemetry::EXTRA_PARAMS)));

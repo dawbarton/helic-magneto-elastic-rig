@@ -7,7 +7,11 @@
 //! time" in the platform's `docs/user_guide.md` and "Adding an experiment" in
 //! its `docs/developer_guide.md`.
 
-use helic_core::controller::PassThrough;
+use fw_magnetoelastic_rig::control::MagnetoelasticControl;
+#[allow(unused_imports)]
+pub use fw_magnetoelastic_rig::safety_limits::{
+    DAC_OUT_CEILING_V, DAC_OUT_FLOOR_V, DAC_VREF, MID_RAIL, SAFE_OUT_MAX_V, SAFE_OUT_MIN_V,
+};
 use helic_fw_support::net::NetConfig;
 pub use helic_rt::SampleRate;
 
@@ -43,13 +47,11 @@ pub const LASER_RANGE_MM: f32 = 50.0;
 /// logical command so that neither `MID_RAIL + out/2` (A) nor
 /// `MID_RAIL - out/2` (C) ever exceeds this, which bounds `out` itself to
 /// ±3.904 V rather than the ±1.952 V of the previous per-channel convention.
-pub const DAC_OUT_CEILING_V: f32 = 4.0;
 
 /// Lower bound on the same channel voltages. Chosen symmetric about
 /// `MID_RAIL` for the interim unipolar output stage, so the same bound
 /// protects both channels via `out/2`. A future bipolar output stage will
 /// re-home the common mode and turn these into independent ± limits.
-pub const DAC_OUT_FLOOR_V: f32 = 0.096;
 
 /// Safe tip-displacement window (laser, mm). Outside this the gate latches a
 /// fault and holds the actuator quiet until the host re-arms. Conservative
@@ -324,20 +326,8 @@ pub const NET_CONFIG: NetConfig = NetConfig::Static {
 /// Locally administered MAC address.
 pub const MAC_ADDR: [u8; 6] = [0x02, 0x48, 0x4C, 0x00, 0x00, 0x01];
 
-/// The controller that runs inside every sample tick.
-///
-/// `type` gives a concrete Rust type a local name. Selecting it at compile
-/// time lets Rust specialise the real-time loop, avoiding dynamic dispatch in
-/// the 125 microsecond tick budget. Swap this alias and `make_controller()`
-/// together, for example:
-///
-/// ```ignore
-/// pub type ActiveController = helic_core::controller::PidController;
-/// pub fn make_controller() -> ActiveController {
-///     PidController::new(Pid::new(PidConfig { kp: 1.0, ..Default::default() }), 0)
-/// }
-/// ```
-pub type ActiveController = PassThrough;
+/// Run-time-selectable, statically dispatched control policy.
+pub type ActiveController = MagnetoelasticControl<HARMONICS>;
 /// Statically selected core-1 programme.
 pub type ActiveProgram = helic_rt::StandardProgram<ActiveController, HARMONICS, TABLE_CAPACITY>;
 
@@ -346,7 +336,7 @@ pub type ActiveProgram = helic_rt::StandardProgram<ActiveController, HARMONICS, 
 /// Keep constructor defaults consistent with the controller's `param_value`
 /// implementation so the host-visible parameter shadow starts correctly.
 pub fn make_controller() -> ActiveController {
-    PassThrough
+    MagnetoelasticControl::new()
 }
 
 /// Selected sample-rate preset. The preset supplies exact PWM divider values;

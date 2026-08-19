@@ -17,9 +17,17 @@ license = "MIT"
 [features]
 # Select exactly one physical WIZnet chip. The default matches the controller
 # fitted to this rig, so a plain `cargo run --release` flashes the right image.
-default = ["board-w5500"]
-board-w5500 = ["helic-fw-support/net-wiznet-w5500"]
-board-w6100 = ["helic-fw-support/net-wiznet-w6100"]
+default = ["board-w5500", "rt-sram"]
+firmware = [
+    "dep:helic-drivers", "dep:helic-fw-optoncdt", "dep:helic-fw-rt",
+    "dep:helic-fw-support", "dep:cortex-m-rt", "dep:defmt", "dep:defmt-rtt",
+    "dep:embassy-embedded-hal", "dep:embassy-executor", "dep:embassy-net",
+    "dep:embassy-rp", "dep:embassy-sync", "dep:embassy-time", "dep:fixed",
+    "dep:panic-probe", "dep:static_cell",
+]
+board-w5500 = ["firmware", "helic-fw-support/net-wiznet-w5500", "rt-sram"]
+board-w6100 = ["firmware", "helic-fw-support/net-wiznet-w6100", "rt-sram"]
+rt-sram = ["helic-core/rt-sram", "helic-rt/rt-sram"]
 
 # Diagnostic builds used to bisect real-time faults. Each removes or loosens
 # one part of the loop, so an image built with any of them is not a production
@@ -38,29 +46,36 @@ helic-fw-build.workspace = true
 
 [dependencies]
 helic-core.workspace = true
-helic-drivers.workspace = true
+helic-drivers = { workspace = true, optional = true }
+helic-proto.workspace = true
 helic-rt.workspace = true
-helic-fw-optoncdt.workspace = true
-helic-fw-rt.workspace = true
-helic-fw-support = { workspace = true, features = ["net-wiznet"] }
-cortex-m-rt.workspace = true
-defmt.workspace = true
-defmt-rtt.workspace = true
-embassy-embedded-hal.workspace = true
-embassy-executor.workspace = true
-embassy-net.workspace = true
-embassy-rp.workspace = true
-embassy-sync.workspace = true
-embassy-time.workspace = true
-fixed.workspace = true
-panic-probe.workspace = true
-static_cell.workspace = true
+helic-fw-optoncdt = { workspace = true, optional = true }
+helic-fw-rt = { workspace = true, optional = true }
+helic-fw-support = { workspace = true, features = ["net-wiznet"], optional = true }
+cortex-m-rt = { workspace = true, optional = true }
+defmt = { workspace = true, optional = true }
+defmt-rtt = { workspace = true, optional = true }
+embassy-embedded-hal = { workspace = true, optional = true }
+embassy-executor = { workspace = true, optional = true }
+embassy-net = { workspace = true, optional = true }
+embassy-rp = { workspace = true, optional = true }
+embassy-sync = { workspace = true, optional = true }
+embassy-time = { workspace = true, optional = true }
+fixed = { workspace = true, optional = true }
+panic-probe = { workspace = true, optional = true }
+static_cell = { workspace = true, optional = true }
+
+[[bin]]
+name = "fw-magnetoelastic-rig"
+path = "src/main.rs"
+required-features = ["firmware"]
 
 # Platform crates, pinned to one HELIC-DAQ release. Upgrading is a deliberate
 # edit: read the tag message for consumer-visible changes first.
 [workspace.dependencies]
 helic-core = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
 helic-drivers = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
+helic-proto = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
 helic-rt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
 helic-fw-build = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
 helic-fw-optoncdt = { git = "https://github.com/dawbarton/helic-daq", tag = "v0.2.5" }
@@ -82,6 +97,19 @@ embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime
 fixed = "1.31.0"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 static_cell = "2.1.1"
+
+# Temporary development patch while the breaking StandardControl/PLL platform
+# change is reviewed and released. Remove this whole section when repinning
+# all three release references to the resulting tag.
+[patch."https://github.com/dawbarton/helic-daq"]
+helic-core = { path = "../helic-daq/helic-core" }
+helic-drivers = { path = "../helic-daq/helic-drivers" }
+helic-proto = { path = "../helic-daq/helic-proto" }
+helic-rt = { path = "../helic-daq/helic-rt" }
+helic-fw-build = { path = "../helic-daq/firmware/build" }
+helic-fw-optoncdt = { path = "../helic-daq/firmware/integrations/optoncdt" }
+helic-fw-rt = { path = "../helic-daq/firmware/rt" }
+helic-fw-support = { path = "../helic-daq/firmware/support" }
 
 [profile.release]
 debug = 2

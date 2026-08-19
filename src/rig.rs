@@ -13,7 +13,7 @@ use embassy_rp::{pac, Peri};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 use fixed::traits::ToFixed;
-use helic_core::safety::{clamp_channel_command, StaleCounter};
+use helic_core::safety::StaleCounter;
 #[cfg(not(feature = "diag-skip-dac"))]
 use helic_drivers::ad5064::WORD_SETTLE_US;
 use helic_drivers::ad5064::{Ad5064, ChannelPolarity};
@@ -29,9 +29,9 @@ use crate::board::MagnetoelasticParts;
 // the existing `LASER_RANGE_MM` precedent: the constant is the default, the
 // atomic is the live value.
 use crate::config::{
-    DAC_OUT_CEILING_V, DAC_OUT_FLOOR_V, DISPLACEMENT_MAX_MM, DISPLACEMENT_MIN_MM,
-    LASER_RANGE_MM as DEFAULT_LASER_RANGE_MM, LASER_STALE_AFTER_S, MAX_STATOR_BACKLASH_MM,
-    MAX_STATOR_RATE_MM_S, OUTPUT_CHANNEL, STATOR_BACKLASH_MM as DEFAULT_STATOR_BACKLASH_MM,
+    DISPLACEMENT_MAX_MM, DISPLACEMENT_MIN_MM, LASER_RANGE_MM as DEFAULT_LASER_RANGE_MM,
+    LASER_STALE_AFTER_S, MAX_STATOR_BACKLASH_MM, MAX_STATOR_RATE_MM_S, MID_RAIL, OUTPUT_CHANNEL,
+    SAFE_OUT_MAX_V, SAFE_OUT_MIN_V, STATOR_BACKLASH_MM as DEFAULT_STATOR_BACKLASH_MM,
     STATOR_DATUM_MM as DEFAULT_STATOR_DATUM_MM, STATOR_HOLD_DEFAULT,
     STATOR_RATE_MM_S as DEFAULT_STATOR_RATE_MM_S, STATOR_SEEK_MAX_MM,
 };
@@ -40,21 +40,9 @@ use crate::telemetry::{
     LASER_FRAMES_RECEIVED, LASER_RANGE_MM, LASER_VALUE, STATOR_BACKLASH_MM, STATOR_DATUM_MM,
     STATOR_HOLD, STATOR_JOG_MM, STATOR_POSITION_MM, STATOR_RATE_MM_S, STATOR_TARGET_MM,
 };
+use fw_magnetoelastic_rig::control::{LASER_INPUT, STATOR_INPUT};
 
-/// Index of the laser distance within the measured input vector, after the
-/// eight ADC channels. Mirrors the `INPUTS` order and `measure`'s `values[8]`.
-const LASER_INPUT: usize = 8;
-
-/// Index of the stator position, published by the core-0 stepper task.
-const STATOR_INPUT: usize = 9;
-
-/// DAC reference voltage fitted to the interim analogue board.
-pub const DAC_VREF: f32 = 4.096;
-
-/// Common-mode voltage for the exciter's differential current-controller
-/// input. Both channels rest here so that a logical output of zero produces
-/// zero differential drive. Exact half-scale of the unipolar DAC (2.048 V).
-pub const MID_RAIL: f32 = DAC_VREF / 2.0;
+use crate::config::DAC_VREF;
 
 /// DAC channel wired to the negative differential input of the exciter
 /// current controller (AD5064 channel C). Driven symmetrically with the
@@ -191,8 +179,9 @@ impl Rig for MagnetoelasticRig {
     // `measure` fills this exact order. The common loop appends controller
     // telemetry and generated signals without experiment-specific indices.
     //
-    // AD7609 channels 0 and 1 carry named physical measurements; 2-7 are
-    // spare and keep generic names. Both named channels are differential
+    // AD7609 channels 0 and 1 carry named physical measurements; unused
+    // channels remain acquired in the hardware frame but are not streamed.
+    // Both named channels are differential
     // pairs, as the AD7609's inputs are true-bipolar differential:
     //
     // - `coil`: voltage across a sense coil wound around the stator. This is
@@ -209,12 +198,6 @@ impl Rig for MagnetoelasticRig {
     const INPUTS: &'static [(&'static str, &'static str)] = &[
         ("coil", "V"),
         ("drive", "V"),
-        ("adc2", "V"),
-        ("adc3", "V"),
-        ("adc4", "V"),
-        ("adc5", "V"),
-        ("adc6", "V"),
-        ("adc7", "V"),
         ("laser", "mm"),
         // Stator position as a micrometer barrel reading, published by the
         // core-0 stepper task, so every capture records the gap it was taken
@@ -271,9 +254,8 @@ impl Rig for MagnetoelasticRig {
             self.adc_raw.transfer(&mut raw);
             self.adc_last = helic_drivers::ad7609::decode_frame(&raw);
         }
-        for (value, raw) in values[..8].iter_mut().zip(self.adc_last) {
-            *value = raw as f32 * self.adc_scale;
-        }
+        values[0] = self.adc_last[0] as f32 * self.adc_scale;
+        values[1] = self.adc_last[1] as f32 * self.adc_scale;
         values[LASER_INPUT] = f32::from_bits(LASER_VALUE.load(Ordering::Relaxed));
         values[STATOR_INPUT] = f32::from_bits(STATOR_POSITION_MM.load(Ordering::Relaxed));
     }
@@ -333,7 +315,7 @@ impl Rig for MagnetoelasticRig {
         // Applied after the controller/forcing/table sum, so no single stage
         // can push the exciter past it. The AD5064 driver's own 0-4.096 V
         // clamp remains as a final backstop.
-        clamp_channel_command(out * 0.5, MID_RAIL, DAC_OUT_FLOOR_V, DAC_OUT_CEILING_V) * 2.0
+        out.clamp(SAFE_OUT_MIN_V, SAFE_OUT_MAX_V)
     }
 
     #[inline]

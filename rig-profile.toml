@@ -18,6 +18,10 @@ required_patterns = [
   ["safety_decide"],
   ["actuate_rig"],
   ["write_program_signals"],
+  ["harmonics", "HarmonicFrame", "project"],
+  ["pid", "Pid", "update"],
+  ["MagnetoelasticControl", "full_reset"],
+  ["pll", "Pll", "reacquire"],
   ["table_buffer", "Active", "3get"],
   ["table_buffer", "Active", "8activate"],
 ]

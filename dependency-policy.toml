@@ -25,6 +25,7 @@ dependencies = [
   "helic-fw-optoncdt",
   "helic-fw-rt",
   "helic-fw-support",
+  "helic-proto",
   "helic-rt",
   "panic-probe",
   "static_cell",
